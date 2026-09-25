@@ -1,0 +1,12 @@
+# Example scope file. Copy to scope.yaml and fill in real targets.
+# See core/scope_loader.py for the schema.
+
+authorized_by: "Your name / role"
+authorization_ref: "engagement ref, bug bounty URL, or 'my own infrastructure'"
+
+targets:
+  - host: example.com
+    note: "Replace with your own authorized target"
+    permitted_techniques: [passive_recon, port_scan, misconfig_check]
+    active_testing_permitted: false
+    destructive_actions_allowed: false

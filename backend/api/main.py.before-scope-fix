@@ -1,0 +1,203 @@
+"""
+Thin FastAPI layer wrapping the orchestrator.
+
+In-memory assessment store only - swap for Postgres before this is
+anything but a demo. This exists to let the dashboard fetch real
+findings instead of hardcoded HTML rows; it doesn't add any new
+scanning logic itself.
+
+Also serves the frontend as static files, so the whole app is one
+process on one port - no CORS, no separate dev server.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from core.orchestrator import Orchestrator
+from core.rules_of_engagement import RulesOfEngagement
+from core.schema import Asset, Finding
+from evidence.llm_client import OllamaClient
+from evidence.validation_pipeline import default_pipeline
+from modules.discovery_module import DiscoveryModule
+from modules.misconfig_module import MisconfigModule
+from modules.example_web_api_module import WebApiScannerModule
+from api.serializers import serialize_finding
+
+app = FastAPI(title="H4CK-B0T API")
+
+# Dev-only - lock this down before anything but localhost testing.
+# Kept permissive in case you still want to hit the API from a
+# separate dev server; the static mount below makes this unnecessary.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# In-memory store: assessment_id -> list[Finding]. Replace with a real
+# DB layer for anything beyond local demo use.
+_ASSESSMENTS: dict[str, list[Finding]] = {}
+_ASSESSMENT_STATUS: dict[str, str] = {}  # "running" | "complete" | "error: ..."
+_ASSESSMENT_META: dict[str, dict] = {}   # assessment_id -> {target, modules, started_at}
+
+
+class RunAssessmentRequest(BaseModel):
+    target: str                        # hostname, must match RoE authorized_targets
+    modules: list[str] = ["discovery", "misconfig", "web_api"]
+    llm_model: str = "llama3.1"
+
+
+class RunAssessmentResponse(BaseModel):
+    assessment_id: str
+
+
+MODULE_REGISTRY = {
+    "discovery": DiscoveryModule,
+    "misconfig": MisconfigModule,
+    "web_api": WebApiScannerModule,
+}
+
+# asset_type each module expects - WebApiScannerModule only handles
+# "web_app"/"api", Discovery/Misconfig handle "host". The orchestrator
+# already filters by supported_asset_types, so we register the asset as
+# "host" and let each module declare what it can consume.
+_ASSET_TYPE_BY_MODULE = {
+    "discovery": "host",
+    "misconfig": "host",
+    "web_api": "api",
+}
+
+
+def _asset_types_for(modules: list[str]) -> list[str]:
+    """The orchestrator runs each module only against assets whose type
+    it supports, so we register one asset per distinct asset_type the
+    requested modules need."""
+    return sorted({_ASSET_TYPE_BY_MODULE[m] for m in modules if m in _ASSET_TYPE_BY_MODULE})
+
+
+@app.post("/api/assessments/run", response_model=RunAssessmentResponse)
+async def run_assessment(req: RunAssessmentRequest):
+    unknown = [m for m in req.modules if m not in MODULE_REGISTRY]
+    if unknown:
+        raise HTTPException(400, f"unknown module(s): {unknown}")
+
+    assessment_id = str(uuid.uuid4())
+    _ASSESSMENTS[assessment_id] = []
+    _ASSESSMENT_STATUS[assessment_id] = "running"
+    _ASSESSMENT_META[assessment_id] = {
+        "target": req.target,
+        "modules": list(req.modules),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Fire-and-forget background task - the dashboard polls GET
+    # /findings while this runs. A production version would use a real
+    # task queue (Celery/arq) instead of asyncio.create_task.
+    asyncio.create_task(_run_assessment_task(assessment_id, req))
+
+    return RunAssessmentResponse(assessment_id=assessment_id)
+
+
+async def _run_assessment_task(assessment_id: str, req: RunAssessmentRequest):
+    try:
+        roe = RulesOfEngagement(
+            assessment_id=assessment_id,
+            authorized_by="dashboard user - self-authorized demo target",
+            authorized_targets=[req.target],
+            testing_window_start=datetime.now(timezone.utc) - timedelta(minutes=1),
+            testing_window_end=datetime.now(timezone.utc) + timedelta(hours=1),
+            permitted_techniques=["passive_recon", "port_scan", "misconfig_check", "api_testing"],
+            active_testing_permitted=True,
+            destructive_actions_allowed=False,
+        )
+
+        # One Asset per asset_type the requested modules can consume.
+        assets: list[Asset] = []
+        for i, asset_type in enumerate(_asset_types_for(req.modules)):
+            assets.append(Asset(
+                asset_id=f"a{i}",
+                name=req.target,
+                asset_type=asset_type,
+                scope_approved=True,
+                # Metadata the contextual-correlation layer consumes.
+                # In a real run, discovery_module would populate these.
+                metadata={"exposure": "internet"},
+            ))
+
+        modules = [MODULE_REGISTRY[m]() for m in req.modules]
+        orchestrator = Orchestrator(
+            validation_pipeline=default_pipeline(
+                llm_client=OllamaClient(model=req.llm_model)
+            )
+        )
+
+        async for finding in orchestrator.run(roe, assets, modules, automation_level="assisted"):
+            _ASSESSMENTS[assessment_id].append(finding)
+
+        _ASSESSMENT_STATUS[assessment_id] = "complete"
+    except Exception as exc:
+        _ASSESSMENT_STATUS[assessment_id] = f"error: {exc}"
+
+
+@app.get("/api/assessments/{assessment_id}/status")
+async def get_status(assessment_id: str):
+    if assessment_id not in _ASSESSMENT_STATUS:
+        raise HTTPException(404, "assessment not found")
+    return {
+        "status": _ASSESSMENT_STATUS[assessment_id],
+        "finding_count": len(_ASSESSMENTS.get(assessment_id, [])),
+        "meta": _ASSESSMENT_META.get(assessment_id, {}),
+    }
+
+
+@app.get("/api/assessments/{assessment_id}/findings")
+async def get_findings(assessment_id: str):
+    if assessment_id not in _ASSESSMENTS:
+        raise HTTPException(404, "assessment not found")
+    return [serialize_finding(f) for f in _ASSESSMENTS[assessment_id]]
+
+
+@app.get("/api/assessments/{assessment_id}/findings/{finding_id}")
+async def get_finding(assessment_id: str, finding_id: str):
+    findings = _ASSESSMENTS.get(assessment_id, [])
+    for f in findings:
+        if f.finding_id == finding_id:
+            return serialize_finding(f)
+    raise HTTPException(404, "finding not found")
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Static frontend mount. Must come LAST so it doesn't shadow /api/*.
+# The frontend lives at ../../frontend relative to this file.
+# ─────────────────────────────────────────────────────────────────────
+_FRONTEND_DIR = (Path(__file__).resolve().parent.parent.parent / "frontend")
+
+if _FRONTEND_DIR.is_dir():
+    @app.get("/")
+    async def serve_index():
+        return FileResponse(_FRONTEND_DIR / "index.html")
+
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
+else:
+    # Fail loud at import time rather than 404 silently.
+    import logging
+    logging.getLogger("h4ck-bot.api").warning(
+        "frontend directory not found at %s - static serving disabled", _FRONTEND_DIR
+    )
