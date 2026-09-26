@@ -191,6 +191,10 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
       <button class="btn primary" id="start-scan" style="font-size:12px; padding:6px 14px;">
         &#9654; Start scan
       </button>
+      <span id="conn-status" style="font-size:11px; color:var(--text-3);" title="API connection">
+        <span id="conn-dot" style="display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--text-3); vertical-align:middle;"></span>
+        <span id="conn-label">connecting...</span>
+      </span>
       <div class="run-badge" id="run-badge"><span class="pulse" style="background:var(--text-3)"></span>Idle</div>
       <div class="avatar">OP</div>
     </div>
@@ -199,7 +203,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
   <div class="rail">
     <div class="rail-label">Assessment</div>
     <div class="asset-tree">
-      <div class="asset-row selected"><span class="dot" style="background:#4FD1C5"></span>Acme Corp - Q4 VAPT<span class="count">128</span></div>
+      <div class="asset-row selected"><span class="dot" style="background:#4FD1C5"></span>VAPTIX AI Cyber<span class="count">128</span></div>
     </div>
     <div class="rail-divider"></div>
     <div class="rail-label">Scope</div>
@@ -218,16 +222,23 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
       <div class="asset-row"><span class="dot" style="background:#7C89A0"></span>Potential<span class="count">91</span></div>
       <div class="asset-row"><span class="dot" style="background:#5E6B7D"></span>False positive<span class="count">64</span></div>
     </div>
+    <div class="rail-divider"></div>
+    <div class="rail-label">Past assessments</div>
+    <div id="past-assessments" style="font-size:12px; padding:0 8px; color:var(--text-3);">
+      (none)
+    </div>
+
     <div class="scope-note">
       <b>Rules of engagement</b><br>
-      Window: Sep 22-29 &middot; Safe-mode: on<br>Destructive actions: blocked
+      Authorized: <span id="roe-count">0</span> target(s)<br>
+      Source: <code class="mono" style="font-size:10px;">scope.yaml</code>
     </div>
   </div>
 
   <div class="main">
     <div class="main-header">
       <div>
-        <h1>Acme Corp - Q4 VAPT</h1>
+        <h1>VAPTIX AI Cyber</h1>
         <div class="sub">Discover &rarr; Analyze &rarr; Validate &rarr; Correlate &rarr; Prioritize &rarr; Report</div>
       </div>
       <div class="header-actions">
@@ -267,7 +278,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
   <div class="detail" id="detail-panel"></div>
 </div>
-  <script src="app.js"></script>
+  <script src="app.js?v=4"></script>
 
 <!-- Scope viewer: shows what's in scope.yaml on the server. Read-only. -->
 <div id="scope-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">

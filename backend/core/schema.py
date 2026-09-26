@@ -240,6 +240,8 @@ class Finding:
     business_impact: str = ""
     discovered_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     attack_path_id: Optional[str] = None
+    owasp_category: str = ""  # e.g. "A03:2021-Injection" - empty if not OWASP-mapped
+    owasp_category: str = ""  # e.g. "A03:2021-Injection" - empty if not OWASP-mapped
 
     @property
     def severity(self) -> Severity:

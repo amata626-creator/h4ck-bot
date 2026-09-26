@@ -38,8 +38,11 @@ from evidence.validation_pipeline import default_pipeline
 from modules.discovery_module import DiscoveryModule
 from modules.misconfig_module import MisconfigModule
 from modules.example_web_api_module import WebApiScannerModule
+from modules.owasp_top10_module import OwaspTop10Module
 from api.serializers import serialize_finding
 from api.scope_proposals import ProposalStore, verify_token
+from api.rate_limit import RateLimiter
+from api.middleware import RateLimitMiddleware, TokenBucketLimiter
 from store.db import Store
 from reporting.report_builder import (
     build_report_data, build_report_html, build_report_json,
@@ -86,6 +89,9 @@ app.add_middleware(
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _STORE = Store(_PROJECT_ROOT / "data" / "h4ckbot.db")
 
+# Rate limiter: max 2 concurrent scans, 10 per 60s, per client IP.
+_RATE_LIMITER = RateLimiter(max_concurrent=2, max_per_window=10, window_seconds=60.0)
+
 
 # ── Authorized scope (loaded once at import) ────────────────────────
 # The API refuses any assessment whose target is not in scope.yaml.
@@ -121,7 +127,7 @@ except RuntimeError as exc:
 # ── Request/response models ─────────────────────────────────────────
 class RunAssessmentRequest(BaseModel):
     target: str
-    modules: list[str] = ["discovery", "misconfig", "web_api"]
+    modules: list[str] = ["discovery", "misconfig", "web_api", "owasp_top10"]
     llm_model: str = "llama3.1"
 
 
@@ -133,6 +139,7 @@ MODULE_REGISTRY = {
     "discovery": DiscoveryModule,
     "misconfig": MisconfigModule,
     "web_api": WebApiScannerModule,
+    "owasp_top10": OwaspTop10Module,
 }
 
 # All modules operate on the same physical target. We register exactly
@@ -171,20 +178,19 @@ async def get_scope():
 @app.post("/api/assessments/run", response_model=RunAssessmentResponse)
 async def run_assessment(
     req: RunAssessmentRequest,
+    request: Request,
     authorization: str | None = Header(default=None),
 ):
-    # Scope authorizes the TARGET; this authorizes the CALLER. Without
-    # this check, anyone who could reach the API could launch unlimited
-    # real scans against any target in scope.yaml - scope alone is not
-    # caller authentication.
+    # Authorization has two layers and they are independent:
+    #   1. _require_admin checks the CALLER (bearer token).
+    #   2. _SCOPE.is_authorized checks the TARGET (scope.yaml).
+    # Missing either means the request is refused.
     _require_admin(authorization)
 
     unknown = [m for m in req.modules if m not in MODULE_REGISTRY]
     if unknown:
         raise HTTPException(400, f"unknown module(s): {unknown}")
 
-    # Refuse up-front if the target isn't authorized. This is the
-    # authorization boundary - no UI path can add a target.
     if not _SCOPE.is_authorized(req.target):
         raise HTTPException(
             403,
@@ -192,6 +198,16 @@ async def run_assessment(
             f"Authorized targets: {[e.host for e in _SCOPE.targets]}. "
             "Edit scope.yaml on the server to add one.",
         )
+
+    # Per-client rate limiting: 2 concurrent scans, 10 per 60s.
+    # Independent of the API-wide token bucket - that one limits all
+    # requests, this one limits how many scans can actually be
+    # running at once.
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        _RATE_LIMITER.check_and_acquire(client_ip)
+    except ValueError as e:
+        raise HTTPException(429, str(e))
 
     assessment_id = str(uuid.uuid4())
     _STORE.create_assessment(
@@ -201,26 +217,25 @@ async def run_assessment(
         llm_model=req.llm_model,
     )
 
-    asyncio.create_task(_run_assessment_task(assessment_id, req))
+    asyncio.create_task(_run_assessment_task(assessment_id, req, client_ip))
     return RunAssessmentResponse(assessment_id=assessment_id)
 
 
-async def _run_assessment_task(assessment_id: str, req: RunAssessmentRequest):
+async def _run_assessment_task(
+    assessment_id: str,
+    req: RunAssessmentRequest,
+    client_ip: str = "unknown",
+):
     try:
         roe = build_roe(assessment_id, req.target, _SCOPE)
 
-        # Exactly one Asset per target. All modules operate on the same
-        # physical target; registering multiple assets (one per asset
-        # type) caused every module to run once per asset, duplicating
-        # findings. Modules declare the asset types they accept, and
-        # they all include "host".
+        # Exactly one Asset per target. Modules declare the asset types
+        # they accept; a single physical target is a single asset.
         assets = [Asset(
             asset_id="a0",
             name=req.target,
             asset_type="host",
             scope_approved=True,
-            # Metadata the contextual-correlation layer consumes. In a
-            # real run, discovery_module would populate these.
             metadata={"exposure": "internet"},
         )]
 
@@ -238,6 +253,10 @@ async def _run_assessment_task(assessment_id: str, req: RunAssessmentRequest):
     except Exception as exc:
         logger.exception("assessment %s failed", assessment_id)
         _STORE.set_status(assessment_id, f"error: {exc}", error=str(exc))
+    finally:
+        # Always release the rate-limit slot, even if the task errored
+        # or was cancelled.
+        _RATE_LIMITER.release(client_ip)
 
 @app.get("/api/assessments/{assessment_id}/status")
 async def get_status(assessment_id: str):

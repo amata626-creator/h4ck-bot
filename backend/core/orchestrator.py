@@ -120,13 +120,13 @@ async def _example():
 
     roe = RulesOfEngagement(
         assessment_id="demo",
-        authorized_by="CISO, Acme Corp",
-        authorized_targets=["acme-corp.com"],
+        authorized_by="CISO, VAPTIX AI Cyber",
+        authorized_targets=["vaptix-ai-cyber.com"],
         testing_window_start=datetime.now(timezone.utc) - timedelta(minutes=1),
         testing_window_end=datetime.now(timezone.utc) + timedelta(days=7),
         permitted_techniques=["passive_recon", "auth_testing", "api_testing"],
     )
-    assets = [Asset(asset_id="a1", name="api.acme-corp.com",
+    assets = [Asset(asset_id="a1", name="api.vaptix-ai-cyber.com",
                     asset_type="api", scope_approved=True,
                     metadata={"framework": "express", "exposure": "internet"})]
 

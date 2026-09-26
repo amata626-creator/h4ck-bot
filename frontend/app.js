@@ -14,7 +14,7 @@
 const API_BASE = "";                     // same-origin
 const POLL_MS = 1500;
 const DEFAULT_TARGET = "scanme.nmap.org";
-const DEFAULT_MODULES = ["discovery", "misconfig", "web_api"];
+const DEFAULT_MODULES = ["discovery", "misconfig", "web_api", "owasp_top10"];
 
 // ── State ───────────────────────────────────────────────────────────
 let assessmentId = null;
@@ -45,7 +45,8 @@ function statusClass(status) {
   return "potential";
 }
 
-function statusLabel(status) {
+function statusLabel(status, findingKind) {
+  if ((findingKind || "").toLowerCase() === "informational") return "Recorded";
   return {
     validated: "Validated",
     potential: "Potential",
@@ -141,8 +142,8 @@ function renderFindingsTable() {
         </td>
         <td><span class="sev-pill ${sevClass(sev)}">${escapeHtml(sev.charAt(0).toUpperCase() + sev.slice(1))}</span></td>
         <td><span class="cvss-badge mono" style="color:var(--${sev === "info" ? "low" : sev})">${f.cvss?.base_score > 0 ? escapeHtml(String(f.cvss.base_score)) : "&mdash;"}</span></td>
-        <td><span class="status-tag ${statusClass(f.status)}"><span class="sdot"></span>${escapeHtml(statusLabel(f.status))}</span></td>
-        <td>${phase ? `<span class="kc-tag">${escapeHtml(phase.replace(/_/g, " "))}</span>` : ""}</td>
+        <td><span class="status-tag ${statusClass(f.status)}"><span class="sdot"></span>${escapeHtml(statusLabel(f.status, f.finding_kind))}</span></td>
+        <td>${phase ? `<span class="kc-tag">${escapeHtml(phase.replace(/_/g, " "))}</span>` : ""}${f.owasp_category ? ` <span class="kc-tag" style="margin-left:4px;">${escapeHtml(f.owasp_category)}</span>` : ""}</td>
       </tr>`;
   }).join("");
 
@@ -211,7 +212,8 @@ function renderDetail(f) {
       <div class="meta-cell"><div class="l">CVSS</div><div class="v mono" style="color:var(--${sev === "info" ? "low" : sev})">${escapeHtml(f.cvss?.base_score ?? "")}</div></div>
       <div class="meta-cell"><div class="l">CWE</div><div class="v mono">${escapeHtml(f.cwe?.cwe_id || "")}</div></div>
       <div class="meta-cell"><div class="l">Source</div><div class="v mono">${escapeHtml(f.module_source || "")}</div></div>
-      <div class="meta-cell"><div class="l">Status</div><div class="v">${escapeHtml(statusLabel(f.status))}</div></div>
+      <div class="meta-cell"><div class="l">Status</div><div class="v">${escapeHtml(statusLabel(f.status, f.finding_kind))}</div></div>
+      ${f.owasp_category ? `<div class="meta-cell"><div class="l">OWASP Top 10</div><div class="v mono">${escapeHtml(f.owasp_category)}</div></div>` : ""}
     </div>
 
     <div class="section-label">Description</div>
@@ -219,18 +221,25 @@ function renderDetail(f) {
 
     ${f.remediation ? `<div class="section-label">Remediation</div><div style="font-size:12px; color:var(--text-2); line-height:1.6">${escapeHtml(f.remediation)}</div>` : ""}
 
-    <div class="section-label">Validation confidence</div>
-    <div style="display:flex; align-items:baseline; justify-content:space-between;">
-      <span style="font-size:12px; color:var(--text-2)">${passed} of ${applicable.length} applicable layers confirmed</span>
-      <span class="mono" style="font-size:12px; color:var(--validated); font-weight:500">${conf}%</span>
-    </div>
-    <div class="confidence-bar-track"><div class="confidence-bar-fill" style="width:${conf}%"></div></div>
+    ${(f.finding_kind || "").toLowerCase() === "informational" ? `
+      <div class="section-label">Informational finding</div>
+      <div style="font-size:12px; color:var(--text-2); line-height:1.6">
+        This is a discovery result, not a vulnerability claim - it did not go through the validation pipeline.
+      </div>
+    ` : `
+      <div class="section-label">Validation confidence</div>
+      <div style="display:flex; align-items:baseline; justify-content:space-between;">
+        <span style="font-size:12px; color:var(--text-2)">${passed} of ${applicable.length} applicable layers confirmed</span>
+        <span class="mono" style="font-size:12px; color:var(--validated); font-weight:500">${conf}%</span>
+      </div>
+      <div class="confidence-bar-track"><div class="confidence-bar-fill" style="width:${conf}%"></div></div>
+
+      <div class="section-label">Validation layers</div>
+      <div class="layers-list">${layersHtml}</div>
+    `}
 
     <div class="section-label">Evidence</div>
     ${evidenceHtml}
-
-    <div class="section-label">Validation layers</div>
-    <div class="layers-list">${layersHtml}</div>
   `;
 }
 
@@ -437,6 +446,80 @@ function wireProposalForm() {
   }
 }
 
+// ── Connection health ───────────────────────────────────────────────
+async function checkConnection() {
+  const dot = $("#conn-dot");
+  const label = $("#conn-label");
+  try {
+    const resp = await fetch(`${API_BASE}/api/health`, { cache: "no-store" });
+    if (resp.ok) {
+      if (dot) dot.style.background = "var(--validated)";
+      if (label) label.textContent = "connected";
+      return true;
+    }
+    throw new Error(`status ${resp.status}`);
+  } catch (e) {
+    if (dot) dot.style.background = "var(--crit)";
+    if (label) label.textContent = "disconnected";
+    return false;
+  }
+}
+
+// ── Past assessments ────────────────────────────────────────────────
+async function loadPastAssessments() {
+  const el = $("#past-assessments");
+  if (!el) return;
+  try {
+    const resp = await fetch(`${API_BASE}/api/assessments?limit=20`);
+    if (!resp.ok) throw new Error(`${resp.status}`);
+    const items = await resp.json();
+    if (!items.length) {
+      el.innerHTML = '<em style="color:var(--text-3); font-size:11.5px;">(none yet)</em>';
+      return;
+    }
+    el.innerHTML = items.map((a) => {
+      const when = (a.started_at || "").replace("T", " ").slice(0, 16);
+      const active = a.assessment_id === assessmentId ? ' style="background:var(--bg-3); color:var(--text-1);"' : '';
+      return `
+        <div class="asset-row" data-assessment-id="${escapeHtml(a.assessment_id)}"${active}
+             style="font-size:11.5px; padding:5px 8px; border-radius:5px; cursor:pointer; margin-bottom:2px;">
+          <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+            ${escapeHtml(a.target)}
+          </span>
+          <span style="color:var(--text-3); font-size:10.5px; margin-left:6px;">
+            ${escapeHtml(a.status).slice(0, 8)}
+          </span>
+        </div>`;
+    }).join("");
+
+    for (const row of el.querySelectorAll("[data-assessment-id]")) {
+      row.addEventListener("click", () => {
+        assessmentId = row.dataset.assessmentId;
+        selectedFindingId = null;
+        loadAssessment(assessmentId);
+      });
+    }
+  } catch (e) {
+    el.innerHTML = `<em style="color:var(--crit); font-size:11px;">error: ${escapeHtml(e.message)}</em>`;
+  }
+}
+
+async function loadAssessment(id) {
+  try {
+    const s = await getStatus(id);
+    updateRunBadge(s.status === "complete" ? "complete" : (s.status === "running" ? "running" : "error"), s.finding_count);
+    findings = await getFindings(id);
+    renderStats();
+    renderFindingsTable();
+    renderDetail(null);
+    const rpt = $("#view-report"); if (rpt) rpt.disabled = false;
+    setTimeout(loadPastAssessments, 500);   // refresh list after POST returns
+    loadPastAssessments();
+  } catch (e) {
+    alert(`Failed to load assessment: ${e.message}`);
+  }
+}
+
 async function boot() {
   renderDetail(null);
   renderFindingsTable();
@@ -497,6 +580,14 @@ async function boot() {
   });
 
   wireProposalForm();
+
+  // Connection health: check every 5s.
+  checkConnection();
+  setInterval(checkConnection, 5000);
+
+  // Past assessments: load on boot and refresh every 15s.
+  loadPastAssessments();
+  setInterval(loadPastAssessments, 15000);
 }
 
 async function startScanFromForm() {
@@ -553,6 +644,9 @@ function renderScopeSummary(scope) {
   el.textContent = n
     ? `${n} target${n === 1 ? "" : "s"} authorized`
     : "no targets authorized";
+
+  const roe = $("#roe-count");
+  if (roe) roe.textContent = String(n);
 }
 
 function renderScopeModal(scope) {
