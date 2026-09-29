@@ -203,7 +203,13 @@ async def discover_endpoints(base_url: str, max_pages: int = 40) -> list[str]:
             if js_bundles:
                 logger.info(f"deep_crawler: {base_url} - {len(js_bundles)} JS bundle(s) captured, "
                            f"running AI-assisted endpoint extraction on up to {MAX_JS_FILES_FOR_AI}")
-                ollama = OllamaClient()
+                # Matches api/main.py's own default llm_model ("llama3.1") -
+                # OllamaClient()'s own class default ("mistral:7b") is never
+                # installed on this server and was silently 404ing every call,
+                # with every failure swallowed by extract_endpoints_from_js's
+                # try/except and reported as "0 endpoints" indistinguishably
+                # from a genuine negative result.
+                ollama = OllamaClient(model="llama3.1")
                 ai_endpoint_total = 0
                 # Prioritize bundles the regex pass already proved contain
                 # endpoint-like strings - a webpack runtime/manifest bundle
