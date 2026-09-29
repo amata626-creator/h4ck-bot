@@ -202,6 +202,7 @@ def _finding_to_json(f: Finding) -> dict:
         "business_impact": f.business_impact,
         "discovered_at": f.discovered_at.isoformat(),
         "attack_path_id": f.attack_path_id,
+        "owasp_category": f.owasp_category,
         "asset": {
             "asset_id": f.asset.asset_id,
             "name": f.asset.name,
@@ -285,6 +286,7 @@ def _finding_from_json(d: dict) -> Finding:
         status=FindingStatus(d.get("status", "potential")),
         remediation=d.get("remediation", ""),
         business_impact=d.get("business_impact", ""),
+        owasp_category=d.get("owasp_category", ""),
     )
     f.discovered_at = datetime.fromisoformat(d["discovered_at"])
     f.attack_path_id = d.get("attack_path_id")

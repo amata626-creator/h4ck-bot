@@ -13,7 +13,9 @@ from typing import AsyncIterator
 
 from core.module_interface import ModuleRunContext, OutOfScopeError, ScannerModule
 from core.rules_of_engagement import RulesOfEngagement
-from core.schema import Asset, Finding, FindingKind
+from core.schema import Asset, Evidence, EvidenceType, Finding, FindingKind
+from evidence.evidence_store import save_evidence_bytes
+from evidence.screenshot_capture import capture_screenshot
 from evidence.validation_pipeline import ValidationPipeline
 
 logger = logging.getLogger("h4ck-bot.orchestrator")
@@ -40,13 +42,19 @@ class Orchestrator:
 
     async def run(
         self,
+        assessment_id: str,
         roe: RulesOfEngagement,
         assets: list[Asset],
         modules: list[ScannerModule],
         automation_level: str = "assisted",
     ) -> AsyncIterator[Finding]:
+        # assessment_id is the caller's id (the one already stored in the
+        # database) - NOT generated here. Generating our own id here was
+        # a long-standing bug: every log line, evidence storage_ref, and
+        # screenshot path referenced a phantom id that was never written
+        # to the assessments table, so it could never be looked up again.
         run = AssessmentRun(
-            assessment_id=str(uuid.uuid4()),
+            assessment_id=assessment_id,
             roe=roe,
             assets=assets,
             modules=modules,
@@ -81,6 +89,8 @@ class Orchestrator:
                 run._log(f"module {module.capabilities.module_id} skipped - not implemented: {e}")
                 continue
 
+        await self._capture_and_attach_screenshots(run)
+
         run._log(f"assessment {run.assessment_id} complete - {len(run.findings)} findings")
 
     async def _validate_and_record(self, run: AssessmentRun, finding: Finding) -> Finding:
@@ -112,6 +122,54 @@ class Orchestrator:
                  f"{finding.status.value} (confidence={result.overall_confidence:.2f})")
         return finding
 
+    async def _capture_and_attach_screenshots(self, run: AssessmentRun) -> None:
+        """
+        Capture one real browser screenshot per unique asset that
+        produced findings in this run, and attach it as Evidence to
+        every finding on that asset. Best-effort: an asset that isn't
+        web-facing (a bare TCP host, an unreachable target) simply gets
+        no screenshot evidence - logged, never faked or skipped silently.
+        """
+        asset_names = {f.asset.name for f in run.findings}
+
+        for asset_name in asset_names:
+            result = await capture_screenshot(asset_name)
+            if result is None:
+                run._log(f"screenshot capture skipped for {asset_name} - "
+                         f"not reachable over http(s)")
+                continue
+
+            storage_ref = save_evidence_bytes(
+                assessment_id=run.assessment_id,
+                subject_id=f"asset__{asset_name}",
+                filename="screenshot.png",
+                raw_bytes=result.png_bytes,
+            )
+            evidence = Evidence.new(
+                evidence_type=EvidenceType.SCREENSHOT,
+                raw_bytes=result.png_bytes,
+                storage_ref=storage_ref,
+                description=(
+                    f'Full-page screenshot of {result.url_captured} '
+                    f'(HTTP {result.http_status}, title: "{result.page_title}") '
+                    f'captured at assessment time.'
+                ),
+                metadata={
+                    "url_captured": result.url_captured,
+                    "http_status": result.http_status,
+                    "page_title": result.page_title,
+                },
+            )
+
+            attached = 0
+            for f in run.findings:
+                if f.asset.name == asset_name:
+                    f.evidence.append(evidence)
+                    attached += 1
+
+            run._log(f"screenshot captured for {asset_name} -> {storage_ref} "
+                     f"(attached to {attached} finding(s))")
+
 
 async def _example():
     from datetime import datetime, timedelta, timezone
@@ -131,14 +189,9 @@ async def _example():
                     metadata={"framework": "express", "exposure": "internet"})]
 
     orch = Orchestrator(validation_pipeline=default_pipeline())
-    async for f in orch.run(roe, assets, modules=[WebApiScannerModule()]):
+    async for f in orch.run(str(uuid.uuid4()), roe, assets, modules=[WebApiScannerModule()]):
         print(f.finding_id, f.title, f.status.value, f.severity.value)
 
 
 if __name__ == "__main__":
-    # With the real ContextualCorrelationLayer wired in and asset
-    # metadata populated (framework=express -> hand_rolled authz,
-    # exposure=internet), the contextual layer contributes a signal and
-    # the pipeline can approach VALIDATED once the LLM layer also passes.
-    # Run: python3 -m core.orchestrator
     asyncio.run(_example())

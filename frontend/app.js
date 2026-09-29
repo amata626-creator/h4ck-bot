@@ -177,14 +177,24 @@ function renderDetail(f) {
     ? Math.round((applicable.reduce((a, l) => a + (l.confidence || 0), 0) / applicable.length) * 100)
     : 0;
 
-  const evidenceHtml = (f.evidence || []).map((e) => `
+  const evidenceHtml = (f.evidence || []).map((e) => {
+    const isScreenshot = e.evidence_type === "screenshot";
+    const evUrl = `/api/assessments/${encodeURIComponent(assessmentId)}/findings/${encodeURIComponent(f.finding_id)}/evidence/${encodeURIComponent(e.evidence_id)}`;
+    const imgHtml = isScreenshot
+      ? `<img src="${evUrl}" alt="${escapeHtml(e.description || "Screenshot evidence")}"
+           style="max-width:100%; border-radius:6px; display:block; margin-bottom:6px; cursor:zoom-in; border:1px solid var(--border, #333);"
+           onclick="window.open('${evUrl}', '_blank')" loading="lazy">`
+      : "";
+    return `
     <div class="evidence-shot">
+      ${imgHtml}
       <div class="shot-canvas">${escapeHtml(e.evidence_type)} &middot; ${escapeHtml(e.description || "")}</div>
       <div class="shot-cap">
         <span>${escapeHtml((e.captured_at || "").slice(0, 19).replace("T", " "))} UTC</span>
         <span class="mono">sha256: ${escapeHtml((e.content_hash || "").slice(0, 8))}...</span>
       </div>
-    </div>`).join("") || `<div style="color:var(--text-3); font-size:11.5px">No evidence attached.</div>`;
+    </div>`;
+  }).join("") || `<div style="color:var(--text-3); font-size:11.5px">No evidence attached.</div>`;
 
   const layersHtml = layers.map((l) => {
     const applicableFlag = l.applicable !== false;
