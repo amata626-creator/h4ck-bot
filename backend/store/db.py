@@ -203,6 +203,7 @@ def _finding_to_json(f: Finding) -> dict:
         "discovered_at": f.discovered_at.isoformat(),
         "attack_path_id": f.attack_path_id,
         "owasp_category": f.owasp_category,
+        "requires_corroboration": f.requires_corroboration,
         "asset": {
             "asset_id": f.asset.asset_id,
             "name": f.asset.name,
@@ -244,6 +245,7 @@ def _finding_to_json(f: Finding) -> dict:
                     "confidence": l.confidence,
                     "notes": l.notes,
                     "applicable": l.applicable,
+                    "advisory": l.advisory,
                 }
                 for l in f.validation.layers
             ],
@@ -287,6 +289,7 @@ def _finding_from_json(d: dict) -> Finding:
         remediation=d.get("remediation", ""),
         business_impact=d.get("business_impact", ""),
         owasp_category=d.get("owasp_category", ""),
+        requires_corroboration=d.get("requires_corroboration", True),
     )
     f.discovered_at = datetime.fromisoformat(d["discovered_at"])
     f.attack_path_id = d.get("attack_path_id")
@@ -309,6 +312,7 @@ def _finding_from_json(d: dict) -> Finding:
             confidence=l["confidence"],
             notes=l.get("notes", ""),
             applicable=l.get("applicable", True),
+            advisory=l.get("advisory", False),
         )
         for l in d.get("validation", {}).get("layers", [])
     ])
