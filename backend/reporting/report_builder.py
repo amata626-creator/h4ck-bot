@@ -68,8 +68,10 @@ class ReportData:
         "(e.g. open ports) are recorded without validation, as they are "
         "observations rather than vulnerability claims. Non-informational "
         "findings carry a per-layer validation breakdown; only findings "
-        "with a 'Validated' status have passed every applicable layer at "
-        ">= 0.85 aggregate confidence."
+        "with a 'Validated' status have passed every deterministic "
+        "(non-advisory) layer at >= 0.85 aggregate confidence. The "
+        "AI-assisted layer is advisory: it informs the review but does not "
+        "gate the verdict."
     )
 
 
@@ -124,7 +126,9 @@ def build_report_json(data: ReportData) -> dict[str, Any]:
 
 def _finding_to_report_dict(f: Finding) -> dict[str, Any]:
     applicable = [l for l in f.validation.layers if l.applicable]
-    passed = [l for l in applicable if l.passed]
+    gating = [l for l in applicable if not l.advisory]   # deterministic layers decide status
+    basis = gating or applicable
+    passed = [l for l in gating if l.passed]
     return {
         "finding_id": f.finding_id,
         "title": f.title,
@@ -148,15 +152,16 @@ def _finding_to_report_dict(f: Finding) -> dict[str, Any]:
         "has_screenshot": any(e.evidence_type == EvidenceType.SCREENSHOT for e in f.evidence),
         "validation": {
             "applicable_layers": len(applicable),
+            "gating_layers": len(gating),
             "passed_layers": len(passed),
             "confidence": (
-                sum(l.confidence for l in applicable) / len(applicable)
-                if applicable else 0.0
+                sum(l.confidence for l in basis) / len(basis) if basis else 0.0
             ),
             "layers": [
                 {
                     "name": l.layer_name,
                     "applicable": l.applicable,
+                    "advisory": l.advisory,
                     "passed": l.passed,
                     "confidence": l.confidence,
                     "notes": l.notes,
@@ -329,14 +334,22 @@ def _render_finding(f: Finding) -> str:
 
     sev = f.severity.value
     applicable = [l for l in f.validation.layers if l.applicable]
-    passed = [l for l in applicable if l.passed]
-    conf = (sum(l.confidence for l in applicable) / len(applicable)) if applicable else 0.0
+    gating = [l for l in applicable if not l.advisory]
+    basis = gating or applicable
+    passed = [l for l in gating if l.passed]
+    conf = (sum(l.confidence for l in basis) / len(basis)) if basis else 0.0
+
+    def _layer_label(l) -> str:
+        if not l.applicable:
+            return "not applicable"
+        verdict = "pass" if l.passed else "fail"
+        return f"{verdict} &middot; advisory" if l.advisory else verdict
 
     layers_html = "\n".join(
         f'<div class="layer">'
         f'<span class="name">{esc(l.layer_name)}</span>'
         f'<span class="status">'
-        f'{"not applicable" if not l.applicable else ("pass" if l.passed else "fail")}'
+        f'{_layer_label(l)}'
         f' ({round(l.confidence * 100)}%)'
         f'</span>'
         f'</div>'
@@ -371,7 +384,7 @@ def _render_finding(f: Finding) -> str:
 
   <div class="layers">
     <div style="margin-bottom:4px"><strong>Validation:</strong>
-      {len(passed)} of {len(applicable)} applicable layers passed &mdash;
+      {len(passed)} of {len(gating)} deciding layers passed &mdash;
       aggregate confidence {round(conf * 100)}%
       &middot; {len(f.evidence)} evidence item(s)
     </div>

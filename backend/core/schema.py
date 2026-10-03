@@ -163,12 +163,19 @@ class ValidationLayerResult:
     Layers MUST set applicable=False explicitly when they have no check
     for the finding type. The default is True (a layer that ran a check
     and produced a verdict is, by definition, applicable).
+
+    `advisory` marks a layer whose verdict INFORMS but does not GATE: it
+    is shown in the report and can lower confidence, but it cannot by
+    itself block a VALIDATED status or force a FALSE_POSITIVE. The
+    non-deterministic AI layer is advisory, so a flaky LLM opinion can't
+    veto a finding that every deterministic layer confirms.
     """
     layer_name: str
     passed: bool
     confidence: float
     notes: str = ""
     applicable: bool = True
+    advisory: bool = False
 
 
 @dataclass
@@ -180,30 +187,42 @@ class ValidationResult:
         return [l for l in self.layers if l.applicable]
 
     @property
+    def gating_layers(self) -> list[ValidationLayerResult]:
+        """Applicable layers that actually decide status - deterministic
+        layers only. Advisory (e.g. AI) layers are excluded from the gate."""
+        return [l for l in self.layers if l.applicable and not l.advisory]
+
+    @property
     def overall_confidence(self) -> float:
-        applicable = self.applicable_layers
-        if not applicable:
+        # Confidence that drives the VALIDATED threshold: the gating
+        # (deterministic) layers. Falls back to applicable layers only if
+        # there are no gating layers at all, so display is never empty.
+        basis = self.gating_layers or self.applicable_layers
+        if not basis:
             return 0.0
-        return sum(l.confidence for l in applicable) / len(applicable)
+        return sum(l.confidence for l in basis) / len(basis)
 
     @property
     def status(self) -> FindingStatus:
         if not self.layers:
             return FindingStatus.POTENTIAL
 
-        applicable = self.applicable_layers
-
-        # If no layer could evaluate this finding, we can't claim it's a
-        # false positive either - it just hasn't been validated.
-        if not applicable:
+        if not self.applicable_layers:
+            # Nothing could evaluate this finding - not validated, but not a
+            # false positive either.
             return FindingStatus.POTENTIAL
 
-        passed = [l for l in applicable if l.passed]
-        failed = [l for l in applicable if not l.passed]
+        gating = self.gating_layers
+        if not gating:
+            # Only advisory opinions exist; no deterministic layer gated it.
+            return FindingStatus.NEEDS_REVIEW
 
-        if len(passed) == len(applicable) and self.overall_confidence >= 0.85:
+        passed = [l for l in gating if l.passed]
+        failed = [l for l in gating if not l.passed]
+
+        if len(passed) == len(gating) and self.overall_confidence >= 0.85:
             return FindingStatus.VALIDATED
-        if len(failed) == len(applicable):
+        if len(failed) == len(gating):
             return FindingStatus.FALSE_POSITIVE
         return FindingStatus.NEEDS_REVIEW
 

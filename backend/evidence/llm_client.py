@@ -112,7 +112,9 @@ class OllamaClient:
             ],
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.1},
+            # Deterministic: temperature 0 + fixed seed so the same evidence
+            # yields the same verdict across runs (no coin-flip validation).
+            "options": {"temperature": 0, "seed": 42, "top_p": 1.0},
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)
