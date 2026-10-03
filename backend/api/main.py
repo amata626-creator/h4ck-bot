@@ -50,6 +50,14 @@ from reporting.report_builder import (
     build_report_data, build_report_html, build_report_json,
 )
 
+# Red-team (hypothesis-driven) assessment pipeline.
+import httpx
+from core.module_interface import ModuleRunContext
+from recon.module import ReconModule
+from semantic.model import SemanticModelBuilder
+from redteam.orchestrator import RedTeamOrchestrator
+from redteam.executors import ExecutorRegistry, ExecContext, FetchResult
+
 logger = logging.getLogger("h4ck-bot.api")
 
 # ── Logging setup ───────────────────────────────────────────────────
@@ -466,6 +474,164 @@ async def get_report_html(assessment_id: str):
     findings = _STORE.list_findings(assessment_id)
     data = build_report_data(meta, findings, scope_note=_SCOPE.authorization_ref)
     return HTMLResponse(build_report_html(data))
+
+# ── Red-team assessment (hypothesis-driven loop) ────────────────────
+# recon -> semantic model -> hypotheses -> gated plan -> run AUTO/approved
+# steps through executors -> validation -> store. Semi-autonomous by default:
+# non-destructive passive steps auto-run; active steps wait for approval.
+#
+# In-memory red-team state (plan + pending steps + the recon/semantic/roe needed
+# to run an approved step later). Findings persist via _STORE; this dict does
+# not survive a restart — move to the DB when this grows past a demo.
+_REDTEAM: dict[str, dict] = {}
+_REDTEAM_REGISTRY = ExecutorRegistry()
+
+
+class RunRedTeamRequest(BaseModel):
+    target: str
+    automation_level: str = "semi_autonomous"
+    llm_model: str = "llama3.1"
+
+
+def _owner_field_for(semantic, endpoints: list[str]) -> str:
+    for res in semantic.resources:
+        if any(e in res.endpoints for e in endpoints):
+            return res.owner_field or ""
+    return ""
+
+
+async def _live_fetch(url: str) -> FetchResult:
+    # GET only — the executor never needs more, and this keeps it non-destructive.
+    async with httpx.AsyncClient(verify=False, timeout=10.0, follow_redirects=True) as c:
+        r = await c.get(url)
+        return FetchResult(url=url, status=r.status_code, text=r.text[:5000],
+                           headers={k.lower(): v for k, v in r.headers.items()})
+
+
+def _make_exec_factory(semantic, roe, base_url: str):
+    host = roe.authorized_targets[0] if roe.authorized_targets else ""
+
+    def factory(hyp):
+        return ExecContext(
+            target_host=host, roe=roe, fetch=_live_fetch,
+            candidate_ids=["1", "2", "3"],
+            owner_field=_owner_field_for(semantic, hyp.target_endpoints),
+            base_url=base_url,
+        )
+    return factory
+
+
+@app.post("/api/redteam/assess", response_model=RunAssessmentResponse)
+async def redteam_assess(
+    req: RunRedTeamRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    _require_admin(authorization)
+    if not _SCOPE.is_authorized(req.target):
+        raise HTTPException(
+            403,
+            f"target '{req.target}' is not in the authorized scope. "
+            f"Authorized targets: {[e.host for e in _SCOPE.targets]}.",
+        )
+    assessment_id = str(uuid.uuid4())
+    _STORE.create_assessment(assessment_id=assessment_id, target=req.target,
+                             modules=["redteam"], llm_model=req.llm_model)
+    asyncio.create_task(_run_redteam_task(assessment_id, req))
+    return RunAssessmentResponse(assessment_id=assessment_id)
+
+
+async def _run_redteam_task(assessment_id: str, req: RunRedTeamRequest) -> None:
+    try:
+        roe = build_roe(assessment_id, req.target, _SCOPE)
+        asset = Asset(asset_id="a0", name=req.target, asset_type="host",
+                      scope_approved=True, metadata={"exposure": "internet"})
+
+        # 1. recon (ReconModule stashes the ReconResult on ctx.config)
+        ctx = ModuleRunContext(assessment_id=assessment_id, assets=[asset], roe=roe,
+                               automation_level=req.automation_level, config={})
+        async for _ in ReconModule().run(ctx):
+            pass
+        recon = ctx.config.get("recon_results", {}).get("a0")
+        if recon is None:
+            _STORE.set_status(assessment_id, "error: recon produced no result", error="recon empty")
+            return
+
+        # 2. semantic model (local LLM)
+        semantic = await SemanticModelBuilder(model=req.llm_model).build(recon)
+
+        # 3. reason + plan + run AUTO steps, validate, store
+        base_url = (recon.base_urls or [f"https://{req.target}"])[0]
+        orch = RedTeamOrchestrator(
+            _REDTEAM_REGISTRY,
+            default_pipeline(llm_client=OllamaClient(model=req.llm_model)),
+        )
+        factory = _make_exec_factory(semantic, roe, base_url)
+        result = await orch.assess(
+            assessment_id=assessment_id, target=req.target, roe=roe,
+            automation_level=req.automation_level, recon=recon,
+            semantic=semantic, exec_factory=factory,
+        )
+        for f in result.findings:
+            _STORE.insert_finding(assessment_id, f)
+
+        _REDTEAM[assessment_id] = {
+            "plan": result.plan,
+            "semantic": semantic,
+            "roe": roe,
+            "base_url": base_url,
+            "llm_model": req.llm_model,
+            "pending": {s.hypothesis.hypothesis_id: s for s in result.plan.pending},
+        }
+        _STORE.set_status(assessment_id, "complete")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("redteam assessment %s failed", assessment_id)
+        _STORE.set_status(assessment_id, f"error: {exc}", error=str(exc))
+
+
+@app.get("/api/redteam/assessments/{assessment_id}")
+async def redteam_get(assessment_id: str):
+    meta = _STORE.get_assessment(assessment_id)
+    if meta is None:
+        raise HTTPException(404, "assessment not found")
+    out = {
+        "status": meta["status"],
+        "target": meta["target"],
+        "findings": [serialize_finding(f) for f in _STORE.list_findings(assessment_id)],
+    }
+    rt = _REDTEAM.get(assessment_id)
+    if rt:
+        out["plan"] = rt["plan"].summary()
+        out["pending_step_ids"] = list(rt["pending"].keys())
+    return out
+
+
+@app.post("/api/redteam/assessments/{assessment_id}/steps/{hypothesis_id}/approve")
+async def redteam_approve(
+    assessment_id: str,
+    hypothesis_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    _require_admin(authorization)
+    rt = _REDTEAM.get(assessment_id)
+    if rt is None:
+        raise HTTPException(404, "assessment not found, or its plan is no longer in memory")
+    step = rt["pending"].get(hypothesis_id)
+    if step is None:
+        raise HTTPException(404, "no pending step with that hypothesis id")
+    orch = RedTeamOrchestrator(
+        _REDTEAM_REGISTRY,
+        default_pipeline(llm_client=OllamaClient(model=rt.get("llm_model", "llama3.1"))),
+    )
+    factory = _make_exec_factory(rt["semantic"], rt["roe"], rt["base_url"])
+    findings = await orch.approve_step(step, factory)
+    for f in findings:
+        _STORE.insert_finding(assessment_id, f)
+    rt["pending"].pop(hypothesis_id, None)
+    return {"approved": hypothesis_id,
+            "findings": [serialize_finding(f) for f in findings]}
+
 
 # ── Static frontend mount — MUST be last ────────────────────────────
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
