@@ -491,6 +491,7 @@ class RunRedTeamRequest(BaseModel):
     target: str
     automation_level: str = "semi_autonomous"
     llm_model: str = "llama3.1"
+    llm_timeout: float = 300.0
 
 
 def _owner_field_for(semantic, endpoints: list[str]) -> str:
@@ -557,8 +558,23 @@ async def _run_redteam_task(assessment_id: str, req: RunRedTeamRequest) -> None:
             _STORE.set_status(assessment_id, "error: recon produced no result", error="recon empty")
             return
 
-        # 2. semantic model (local LLM)
-        semantic = await SemanticModelBuilder(model=req.llm_model).build(recon)
+        # 2. semantic model (local LLM). If it fails or times out, degrade
+        # gracefully to recon-only hypotheses rather than failing the whole
+        # assessment — the loop still produces injection/XSS/auth hypotheses;
+        # only the semantic-dependent ones (BOLA/mass-assignment) are skipped.
+        try:
+            semantic = await SemanticModelBuilder(
+                model=req.llm_model, timeout=req.llm_timeout,
+            ).build(recon)
+        except Exception as exc:  # noqa: BLE001 - LLM slow/down/invalid output
+            from semantic.types import SemanticModel
+            logger.warning(
+                "redteam %s: semantic model unavailable (%s) - continuing "
+                "recon-only (no BOLA/mass-assignment hypotheses this run)",
+                assessment_id, exc,
+            )
+            semantic = SemanticModel(target=req.target,
+                                     unknowns=[f"semantic model unavailable: {exc}"])
 
         # 3. reason + plan + run AUTO steps, validate, store
         base_url = (recon.base_urls or [f"https://{req.target}"])[0]
