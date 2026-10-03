@@ -6,18 +6,21 @@ Produces two formats from a set of findings:
   - HTML: a self-contained page (inline CSS, no external assets) that
     renders in any browser and prints cleanly to PDF
 
-The HTML report deliberately avoids JavaScript. If you save it, email
-it, or serve it from a static share, it still works.
+Screenshot evidence is base64-embedded directly into the HTML (not
+linked as a separate file), so the report stays a single portable
+document even when it's the screenshot evidence carrying the proof.
 """
 
 from __future__ import annotations
 
+import base64
 import html
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from core.schema import Finding, Severity
+from core.schema import EvidenceType, Finding, Severity
+from evidence.evidence_store import read_evidence_bytes
 
 
 SEVERITY_ORDER = [
@@ -142,6 +145,7 @@ def _finding_to_report_dict(f: Finding) -> dict[str, Any]:
         "remediation": f.remediation,
         "business_impact": f.business_impact,
         "evidence_count": len(f.evidence),
+        "has_screenshot": any(e.evidence_type == EvidenceType.SCREENSHOT for e in f.evidence),
         "validation": {
             "applicable_layers": len(applicable),
             "passed_layers": len(passed),
@@ -226,6 +230,9 @@ def build_report_html(data: ReportData) -> str:
   .layers .layer:last-child {{ border-bottom: none; }}
   .layers .name {{ width: 200px; color: var(--muted); }}
   .layers .status {{ color: var(--muted); }}
+  .screenshot {{ margin: 12px 0; }}
+  .screenshot img {{ display: block; max-width: 100%; border: 1px solid var(--border); border-radius: 6px; }}
+  .screenshot-caption {{ font-size: 11.5px; color: var(--muted); margin-top: 4px; }}
   .note {{ background: #f6f6f6; border-left: 3px solid var(--muted); padding: 10px 14px; font-size: 13px; color: #444; margin: 12px 0 20px; }}
   .footer {{ margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }}
   @media print {{
@@ -287,6 +294,35 @@ def _sort_findings(findings: list[Finding]) -> list[Finding]:
     )
 
 
+def _render_screenshots(f: Finding) -> str:
+    def esc(s: Any) -> str:
+        return html.escape(str(s) if s is not None else "")
+
+    shots = [e for e in f.evidence if e.evidence_type == EvidenceType.SCREENSHOT]
+    if not shots:
+        return ""
+
+    parts = []
+    seen_refs = set()
+    for e in shots:
+        if e.storage_ref in seen_refs:
+            continue
+        seen_refs.add(e.storage_ref)
+        try:
+            raw = read_evidence_bytes(e.storage_ref)
+        except FileNotFoundError:
+            continue
+        b64 = base64.b64encode(raw).decode("ascii")
+        caption = esc(e.description or "Screenshot evidence")
+        parts.append(
+            f'<div class="screenshot">'
+            f'<img src="data:image/png;base64,{b64}" alt="{caption}">'
+            f'<div class="screenshot-caption">{caption}</div>'
+            f'</div>'
+        )
+    return "\n".join(parts)
+
+
 def _render_finding(f: Finding) -> str:
     def esc(s: Any) -> str:
         return html.escape(str(s) if s is not None else "")
@@ -308,6 +344,7 @@ def _render_finding(f: Finding) -> str:
     )
 
     cvss_cell = str(f.cvss.base_score) if f.cvss.base_score > 0 else "&mdash;"
+    screenshots_html = _render_screenshots(f)
 
     return f"""
 <div class="finding">
@@ -329,6 +366,8 @@ def _render_finding(f: Finding) -> str:
   <div class="body">{esc(f.description)}</div>
   {f'<div class="body"><strong>Remediation:</strong> {esc(f.remediation)}</div>' if f.remediation else ''}
   {f'<div class="body"><strong>Business impact:</strong> {esc(f.business_impact)}</div>' if f.business_impact else ''}
+
+  {screenshots_html}
 
   <div class="layers">
     <div style="margin-bottom:4px"><strong>Validation:</strong>

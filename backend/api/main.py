@@ -39,6 +39,8 @@ from modules.discovery_module import DiscoveryModule
 from modules.misconfig_module import MisconfigModule
 from modules.example_web_api_module import WebApiScannerModule
 from modules.owasp_top10_module import OwaspTop10Module
+from modules.advanced_checks_module import AdvancedChecksModule
+from modules.advanced_checks2_module import AdvancedChecks2Module
 from api.serializers import serialize_finding
 from api.scope_proposals import ProposalStore, verify_token
 from api.rate_limit import RateLimiter
@@ -140,6 +142,8 @@ MODULE_REGISTRY = {
     "misconfig": MisconfigModule,
     "web_api": WebApiScannerModule,
     "owasp_top10": OwaspTop10Module,
+    "advanced_checks": AdvancedChecksModule,
+    "advanced_checks2": AdvancedChecks2Module,
 }
 
 # All modules operate on the same physical target. We register exactly
@@ -246,7 +250,32 @@ async def _run_assessment_task(
             )
         )
 
-        async for finding in orchestrator.run(roe, assets, modules, automation_level="assisted"):
+        findings: list[Finding] = []
+        async for finding in orchestrator.run(assessment_id, roe, assets, modules, automation_level="assisted"):
+            _STORE.insert_finding(assessment_id, finding)
+            findings.append(finding)
+
+        # Screenshot evidence is attached to these same Finding objects
+        # in-place AFTER orchestrator.run() has finished yielding (see
+        # Orchestrator._capture_and_attach_screenshots) - by design, it
+        # runs once per unique asset rather than per finding, so it has
+        # to happen after the module loop. That means the insert_finding
+        # calls above ran before the screenshot evidence existed. Since
+        # insert_finding is INSERT OR REPLACE, re-persisting every
+        # finding now (the run is fully complete at this point) picks up
+        # that evidence instead of silently losing it.
+        # Re-run validation now that screenshot evidence exists. The
+        # pipeline (including the ai_assisted_analysis and
+        # evidence_correlation layers) originally ran inside
+        # orchestrator.run(), before screenshots were attached - so its
+        # verdicts were computed against an incomplete evidence set
+        # (e.g. evidence_correlation would see only 1 evidence type and
+        # fail, even though a screenshot has since been added). Re-run
+        # it per finding now that the evidence set is final, so the
+        # stored validation result reflects everything the finding
+        # actually has attached.
+        for finding in findings:
+            finding.validation = await orchestrator.validation_pipeline.validate(finding)
             _STORE.insert_finding(assessment_id, finding)
 
         _STORE.set_status(assessment_id, "complete")
@@ -280,6 +309,39 @@ async def get_findings(assessment_id: str):
     if _STORE.get_assessment(assessment_id) is None:
         raise HTTPException(404, "assessment not found")
     return [serialize_finding(f) for f in _STORE.list_findings(assessment_id)]
+
+
+@app.get("/api/assessments/{assessment_id}/findings/{finding_id}/evidence/{evidence_id}")
+async def get_evidence_bytes(assessment_id: str, finding_id: str, evidence_id: str):
+    """
+    Serve the raw bytes of one piece of evidence (a screenshot PNG, a
+    captured HTTP transaction, etc.) so the dashboard can render it
+    directly instead of only showing its text metadata. Read-only, same
+    auth tier as /findings and /report.html (no admin token required -
+    this is scan output, not a scan-triggering or scope-writing action).
+    """
+    from fastapi.responses import Response
+    from core.schema import EvidenceType
+    from evidence.evidence_store import read_evidence_bytes
+
+    if _STORE.get_assessment(assessment_id) is None:
+        raise HTTPException(404, "assessment not found")
+
+    finding = _STORE.get_finding(assessment_id, finding_id)
+    if finding is None:
+        raise HTTPException(404, "finding not found")
+
+    match = next((e for e in finding.evidence if e.evidence_id == evidence_id), None)
+    if match is None:
+        raise HTTPException(404, "evidence not found")
+
+    try:
+        raw = read_evidence_bytes(match.storage_ref)
+    except FileNotFoundError:
+        raise HTTPException(404, "evidence file not found on disk")
+
+    content_type = "image/png" if match.evidence_type == EvidenceType.SCREENSHOT else "text/plain"
+    return Response(content=raw, media_type=content_type)
 
 
 @app.get("/api/assessments/{assessment_id}/findings/{finding_id}")
