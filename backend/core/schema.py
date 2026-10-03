@@ -261,6 +261,19 @@ class Finding:
     attack_path_id: Optional[str] = None
     owasp_category: str = ""  # e.g. "A03:2021-Injection" - empty if not OWASP-mapped
 
+    # Whether this finding's claim needs independent corroboration (>=2
+    # distinct evidence types) to be VALIDATED. True by default - most
+    # findings are inferential and benefit from a second signal. A module
+    # sets this False only when a SINGLE authoritative observation is
+    # dispositive on its own: a security header is literally present or
+    # absent in the captured response, a negotiated TLS version is a fact,
+    # an open port is observed directly. For those, evidence_correlation
+    # has nothing meaningful to cross-check and should not gate the finding.
+    # Inferential findings (BOLA/IDOR, injection, "possible reflected XSS")
+    # keep this True: a single 200 or a single reflection could be
+    # coincidence, so corroboration genuinely matters.
+    requires_corroboration: bool = True
+
     @property
     def severity(self) -> Severity:
         return self.cvss.severity

@@ -147,6 +147,9 @@ class MisconfigModule(ScannerModule):
                 "; ".join(f"{h} ({SECURITY_HEADERS[h][1]})" for h in missing)
             ),
             business_impact="Increases exploitability of client-side attacks (XSS, clickjacking, downgrade).",
+            # A header is literally present or absent in the captured
+            # response - one authoritative observation is dispositive.
+            requires_corroboration=False,
         )
 
         raw = (
@@ -232,6 +235,9 @@ class MisconfigModule(ScannerModule):
             kill_chain_phase=KillChainPhase.RECONNAISSANCE,
             remediation="Renew/replace the certificate with a CA-signed cert and disable TLS versions below 1.2.",
             business_impact="Weakens confidentiality/integrity guarantees of transport encryption; may enable MITM.",
+            # Negotiated TLS version / cert validity are observed facts of
+            # the handshake - a single authoritative observation.
+            requires_corroboration=False,
         )
 
         raw = f"TLS check on {host}:{port}\n{cert_info}\nissues: {issues}\n".encode()

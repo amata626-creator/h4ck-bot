@@ -42,6 +42,23 @@ class EvidenceCorrelationLayer(ValidationLayer):
 
     async def evaluate(self, finding: Finding) -> ValidationLayerResult:
         distinct_types = {e.evidence_type for e in finding.evidence}
+
+        # Deterministic, single-observation findings (missing headers, TLS
+        # version, open port) are proven by one authoritative evidence item;
+        # there is nothing to cross-correlate. This layer abstains rather
+        # than failing them for lacking a second, redundant signal.
+        if not finding.requires_corroboration:
+            return ValidationLayerResult(
+                layer_name=self.name,
+                passed=True,
+                confidence=1.0,
+                notes=(
+                    f"{len(distinct_types)} authoritative evidence type(s); "
+                    "single-observation finding - independent corroboration not required"
+                ),
+                applicable=False,
+            )
+
         passed = len(distinct_types) >= self.MIN_INDEPENDENT_EVIDENCE
         confidence = min(1.0, len(distinct_types) / self.MIN_INDEPENDENT_EVIDENCE)
         return ValidationLayerResult(

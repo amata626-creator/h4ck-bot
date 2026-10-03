@@ -52,6 +52,13 @@ class ContextualCorrelationLayer(ValidationLayer):
     `prior_findings` is the list of findings already validated in this
     assessment run, on any asset. The layer picks out the ones on the
     same asset (by asset_id) and uses them as context.
+
+    ADVISORY: this layer produces a supportive, not-decisive signal
+    (capped at 0.8 by design), so its result is marked advisory=True -
+    it informs the report and nudges confidence but is EXCLUDED from the
+    status gate. A weak contextual prior can neither validate a finding
+    on its own nor block one the dispositive deterministic layers
+    (fingerprinting, response-analysis, evidence-correlation) confirm.
     """
 
     name = "contextual_correlation"
@@ -132,6 +139,7 @@ class ContextualCorrelationLayer(ValidationLayer):
                 confidence=0.0,
                 notes="no contextual signal available for this finding type / asset",
                 applicable=False,
+                advisory=True,
             )
 
         confidence = sum(signals) / len(signals)
@@ -148,4 +156,5 @@ class ContextualCorrelationLayer(ValidationLayer):
             confidence=confidence,
             notes="; ".join(notes),
             applicable=True,
+            advisory=True,
         )
