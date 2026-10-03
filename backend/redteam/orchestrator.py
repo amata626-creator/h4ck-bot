@@ -99,9 +99,9 @@ class RedTeamOrchestrator:
     async def _run_step(self, step: PlannedStep, exec_factory: ExecFactory) -> list[Finding]:
         ex = self.registry.for_hypothesis(step.hypothesis)
         if ex is None:
-            # No dedicated executor yet (e.g. injection/XSS are handled by the
-            # owasp_top10 module in the classic scan path, not here). Honest
-            # no-op rather than a fabricated result.
+            # No dedicated executor for this hypothesis kind yet (BOLA/IDOR,
+            # injection, and reflected XSS have one; others are left to the
+            # module path). Honest no-op rather than a fabricated result.
             logger.info("redteam: no executor for %s (%s) - left for module path",
                         step.hypothesis.hypothesis_id, step.hypothesis.kind.value)
             return []

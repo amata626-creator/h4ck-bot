@@ -69,6 +69,12 @@ class Hypothesis:
     rationale: str
     evidence_refs: list[str] = field(default_factory=list)
 
+    # Grounding for input-level checks (injection/XSS): the specific request
+    # parameter names recon observed on the target endpoint(s). An executor
+    # only ever probes a parameter that appears here, so it cannot invent an
+    # injection point the scanner never saw.
+    target_params: list[str] = field(default_factory=list)
+
     # Classification / scoring.
     cwe: Optional[WeaknessRef] = None
     mitre: Optional[MitreTechnique] = None

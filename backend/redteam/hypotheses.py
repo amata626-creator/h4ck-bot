@@ -99,6 +99,7 @@ class HypothesisGenerator:
                 kind=HypothesisKind.INJECTION,
                 title=f"Injection candidate via {risky[:3]} on {ep.path}",
                 target_endpoints=[ep.path],
+                target_params=risky,
                 rationale=(
                     f"Endpoint {ep.path} accepts parameter(s) {risky[:3]} that commonly reach a "
                     f"query, command, or filter sink. Safe injection probes (inert markers, no "
@@ -125,6 +126,7 @@ class HypothesisGenerator:
                 kind=HypothesisKind.XSS,
                 title=f"Reflected XSS candidate via {ep.params[:3]} on {ep.path}",
                 target_endpoints=[ep.path],
+                target_params=list(ep.params),
                 rationale=(
                     f"{ep.path} renders with input parameter(s) {ep.params[:3]}. An inert HTML-like "
                     f"marker submitted and observed un-escaped in the response would indicate "
