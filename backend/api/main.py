@@ -276,6 +276,7 @@ async def _run_assessment_task(
         # actually has attached.
         for finding in findings:
             finding.validation = await orchestrator.validation_pipeline.validate(finding)
+            finding.status = finding.validation.status
             _STORE.insert_finding(assessment_id, finding)
 
         _STORE.set_status(assessment_id, "complete")

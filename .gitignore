@@ -28,7 +28,10 @@ data/
 scope.yaml
 scope.proposed.yaml
 scope_audit.log
-evidence/
+/evidence/
+data/evidence/
+!backend/evidence/
+!backend/evidence/**
 *.log
 
 # ── Backups from in-session edits ───────────────────────────────────

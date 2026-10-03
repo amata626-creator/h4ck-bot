@@ -1,0 +1,28 @@
+# H4CK-B0T backend runtime dependencies
+# Python 3.11+ required.
+
+# --- Web API ---
+fastapi>=0.110
+uvicorn[standard]>=0.29      # also provides the websockets/httptools extras
+pydantic>=2.6
+
+# --- HTTP client (recon, misconfig, semantic, LLM client) ---
+httpx>=0.27
+
+# --- Config / scope ---
+pyyaml>=6.0
+
+# --- TLS inspection (misconfig TLS checks) ---
+cryptography>=42.0
+
+# --- DNS checks (subdomain takeover, advanced checks) ---
+dnspython>=2.6
+
+# --- WebSocket auth checks (advanced checks batch 2) ---
+websockets>=12.0
+
+# --- Evidence: full-page screenshot capture ---
+# NOTE: after installing this package you must also run:
+#   python -m playwright install chromium
+# (install.sh does this for you)
+playwright>=1.44

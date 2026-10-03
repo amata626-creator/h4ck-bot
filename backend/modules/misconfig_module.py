@@ -34,9 +34,9 @@ CONNECT_TIMEOUT = 5.0
 # header -> (CWE, base severity contribution if missing)
 SECURITY_HEADERS = {
     "strict-transport-security": ("CWE-319", "Missing HSTS allows protocol downgrade / SSL-stripping attacks"),
-    "content-security-policy": ("CWE-1021", "Missing CSP increases XSS/injection impact"),
+    "content-security-policy": ("CWE-693", "Missing CSP increases XSS/injection impact"),
     "x-frame-options": ("CWE-1021", "Missing X-Frame-Options allows clickjacking"),
-    "x-content-type-options": ("CWE-16", "Missing X-Content-Type-Options allows MIME-sniffing attacks"),
+    "x-content-type-options": ("CWE-693", "Missing X-Content-Type-Options allows MIME-sniffing attacks"),
 }
 
 DEFAULT_PAGE_PATHS = [
@@ -140,7 +140,7 @@ class MisconfigModule(ScannerModule):
                 base_score=round(severity_score, 1),
                 vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",
             ),
-            cwe=WeaknessRef(cwe_id=SECURITY_HEADERS[missing[0]][0], name="Missing security header(s)"),
+            cwe=WeaknessRef(cwe_id="CWE-693", name="Protection Mechanism Failure (missing security headers)"),
             kill_chain_phase=KillChainPhase.RECONNAISSANCE,
             remediation=(
                 "Add the missing headers: " +

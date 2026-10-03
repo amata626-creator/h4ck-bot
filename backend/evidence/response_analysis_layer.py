@@ -56,7 +56,7 @@ class RealResponseAnalysisLayer(ValidationLayer):
         for e in relevant:
             preview = e.metadata.get("preview", e.description) or ""
 
-            if "missing security header" in finding.title.lower() or finding.cwe.cwe_id in ("CWE-319", "CWE-1021", "CWE-16"):
+            if "missing security header" in finding.title.lower() or finding.cwe.cwe_id in ("CWE-319", "CWE-1021", "CWE-16", "CWE-693"):
                 checks_run += 1
                 status_match = re.search(r"status:\s*(\d+)", preview)
                 if status_match and status_match.group(1) == "200" and "missing_headers" in preview:
