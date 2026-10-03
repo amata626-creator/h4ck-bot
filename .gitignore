@@ -32,6 +32,9 @@ scope_audit.log
 data/evidence/
 !backend/evidence/
 !backend/evidence/**
+# ...but the un-ignore above must not re-admit compiled bytecode
+backend/evidence/__pycache__/
+backend/evidence/**/*.pyc
 *.log
 
 # ── Backups from in-session edits ───────────────────────────────────
