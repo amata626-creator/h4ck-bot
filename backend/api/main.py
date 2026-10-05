@@ -505,7 +505,7 @@ async def _live_fetch(url: str) -> FetchResult:
     # GET only — the executor never needs more, and this keeps it non-destructive.
     async with httpx.AsyncClient(verify=False, timeout=10.0, follow_redirects=True) as c:
         r = await c.get(url)
-        return FetchResult(url=url, status=r.status_code, text=r.text[:5000],
+        return FetchResult(url=url, status=r.status_code, text=r.text[:200000],
                            headers={k.lower(): v for k, v in r.headers.items()})
 
 
