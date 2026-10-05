@@ -43,8 +43,9 @@ _FETCH_CALL_RE = re.compile(r"""fetch\s*\(\s*["'`]([^"'`]+)["'`]""")
 _AXIOS_CALL_RE = re.compile(r"""axios\.(?:get|post|put|delete|patch)\s*\(\s*["'`]([^"'`]+)["'`]""")
 _XHR_OPEN_RE = re.compile(r"""\.open\s*\(\s*["'`](?:GET|POST|PUT|DELETE|PATCH)["'`]\s*,\s*["'`]([^"'`]+)["'`]""", re.IGNORECASE)
 
-_FORM_RE = re.compile(r"""<form\b[^>]*?(?:action=["']([^"']*)["'])?[^>]*>(.*?)</form>""", re.DOTALL | re.IGNORECASE)
-_FORM_ACTION_RE = re.compile(r"""action=["']([^"']*)["']""", re.IGNORECASE)
+_FORM_RE = re.compile(r"""<form\b([^>]*)>(.*?)</form>""", re.DOTALL | re.IGNORECASE)
+_FORM_ACTION_RE = re.compile(r"""\baction=["']([^"']*)["']""", re.IGNORECASE)
+_FORM_METHOD_RE = re.compile(r"""\bmethod=["']\s*(get|post)\s*["']""", re.IGNORECASE)
 _INPUT_NAME_RE = re.compile(r"""<input\b[^>]*?\bname=["']([^"']+)["']""", re.IGNORECASE)
 _LINK_HREF_RE = re.compile(r"""<a\b[^>]*?\bhref=["']([^"']+)["']""", re.IGNORECASE)
 _SCRIPT_SRC_RE = re.compile(r"""<script\b[^>]*?\bsrc=["']([^"']+)["']""", re.IGNORECASE)
@@ -177,17 +178,22 @@ class Crawler:
         if "html" in content_type:
             # Forms -> endpoints with param names
             for form_match in _FORM_RE.finditer(body):
-                action = form_match.group(1) or url
-                full = urljoin(url, action)
+                attrs = form_match.group(1) or ""
+                action_m = _FORM_ACTION_RE.search(attrs)
+                action = action_m.group(1) if action_m else url
+                full = urljoin(url, action or url)
+                method_m = _FORM_METHOD_RE.search(attrs)
+                method = (method_m.group(1).upper() if method_m else "GET")
                 if not _same_origin(self.base_url, full):
                     continue
                 names = _INPUT_NAME_RE.findall(form_match.group(2))
                 self._endpoints.append(Endpoint(
                     path=_normalize_path(urlparse(full).path),
-                    methods=["POST"],       # conservative: forms usually POST
+                    methods=[method],
                     discovered_from="form",
                     params=names,
-                    content_type="application/x-www-form-urlencoded",
+                    content_type=("text/html" if method == "GET"
+                                  else "application/x-www-form-urlencoded"),
                 ))
 
             # Links
