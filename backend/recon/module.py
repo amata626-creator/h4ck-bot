@@ -32,8 +32,8 @@ from recon.types import Endpoint, ReconResult
 logger = logging.getLogger("h4ck-bot.recon")
 
 DEFAULT_HTTP_PORTS = [80, 443, 8080, 8000, 8888]
-MAX_PAGES = 60
-MAX_DEPTH = 2
+MAX_PAGES = 120
+MAX_DEPTH = 3
 
 
 class ReconModule(ScannerModule):

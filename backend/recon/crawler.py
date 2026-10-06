@@ -32,9 +32,11 @@ import httpx
 from recon.types import Endpoint, HttpTrace
 
 
-DEFAULT_MAX_DEPTH = 2
-DEFAULT_MAX_PAGES = 60
+DEFAULT_MAX_DEPTH = 3
+DEFAULT_MAX_PAGES = 120
 MAX_BODY_CHARS = 60_000
+# Bounded cap on the common-path probe so it never dominates the budget.
+MAX_COMMON_PROBES = 40
 REQ_TIMEOUT = 8.0
 
 # Extract candidates from inline JS. These are the common fetch shapes.
@@ -49,6 +51,23 @@ _FORM_METHOD_RE = re.compile(r"""\bmethod=["']\s*(get|post)\s*["']""", re.IGNORE
 _INPUT_NAME_RE = re.compile(r"""<input\b[^>]*?\bname=["']([^"']+)["']""", re.IGNORECASE)
 _LINK_HREF_RE = re.compile(r"""<a\b[^>]*?\bhref=["']([^"']+)["']""", re.IGNORECASE)
 _SCRIPT_SRC_RE = re.compile(r"""<script\b[^>]*?\bsrc=["']([^"']+)["']""", re.IGNORECASE)
+_LOC_RE = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.IGNORECASE)
+
+# A small, curated set of common paths worth a direct GET on any web target:
+# admin/auth surfaces, API docs, and frequently-exposed config/ops endpoints.
+# All are read-only probes; existence is confirmed by the response, never
+# assumed. Kept short on purpose - this is discovery breadth, not a wordlist.
+_COMMON_PATHS = [
+    "/sitemap.xml", "/.well-known/security.txt",
+    "/admin", "/administrator", "/login", "/signin", "/dashboard",
+    "/user", "/users", "/account", "/profile",
+    "/api", "/api/v1", "/api/v2", "/graphql", "/rest",
+    "/swagger.json", "/swagger-ui", "/openapi.json", "/api-docs", "/v2/api-docs",
+    "/actuator", "/actuator/health", "/health", "/status", "/metrics",
+    "/server-status", "/debug", "/info",
+    "/.env", "/.git/config", "/config.json", "/crossdomain.xml",
+    "/phpinfo.php", "/wp-login.php", "/wp-admin/", "/backup", "/backups",
+]
 
 # Path shape /api/v2/orders/{id} — used to normalize numeric-looking
 # segments into placeholders so we dedup across many instances.
@@ -102,6 +121,7 @@ class Crawler:
         self._client = client
         self._owns_client = client is None
         self._robots_disallowed: list[str] = []
+        self._sitemaps: list[str] = []
         self._visited: set[str] = set()
         self._endpoints: list[Endpoint] = []
         self._js_bundles: list[str] = []
@@ -117,7 +137,13 @@ class Crawler:
         try:
             if self.respect_robots:
                 await self._load_robots()
+            # 1. organic crawl from the root (gets the real site first, so the
+            #    page budget favors real content over probes).
             await self._visit(self.base_url, depth=0)
+            # 2. sitemap-seeded URLs (enumerated surface the crawl may miss).
+            await self._seed_sitemaps()
+            # 3. a bounded probe of common admin/API/config paths.
+            await self._probe_common_paths()
         finally:
             if self._owns_client and self._client is not None:
                 await self._client.aclose()
@@ -138,19 +164,76 @@ class Crawler:
         if resp.status_code != 200:
             return
         self._robots_txt = resp.text[:MAX_BODY_CHARS]
-        # Parse Disallow lines
+        # Parse Disallow lines and any declared Sitemap: URLs (the latter are
+        # a high-value seed for enumerated surface).
         for line in resp.text.splitlines():
             line = line.strip()
-            if line.lower().startswith("disallow:"):
+            low = line.lower()
+            if low.startswith("disallow:"):
                 path = line.split(":", 1)[1].strip()
                 if path and path != "/":
                     self._robots_disallowed.append(path)
+            elif low.startswith("sitemap:"):
+                sm = line.split(":", 1)[1].strip()
+                if sm and sm not in self._sitemaps:
+                    self._sitemaps.append(sm)
 
     def _robots_allows(self, url: str) -> bool:
         if not self._robots_disallowed:
             return True
         path = urlparse(url).path
         return not any(path.startswith(d) for d in self._robots_disallowed)
+
+    async def _seed_sitemaps(self) -> None:
+        """Fetch /sitemap.xml and any robots-declared sitemaps, then visit the
+        <loc> URLs they enumerate (same-origin, bounded by the page budget).
+        A nested sitemap index (<loc> ending in .xml) is followed one level."""
+        candidates = [urljoin(self.base_url + "/", "sitemap.xml")] + list(self._sitemaps)
+        seen: set[str] = set()
+        maps_fetched = 0
+        i = 0
+        while i < len(candidates) and maps_fetched < 10:
+            sm = candidates[i]; i += 1
+            if len(self._visited) >= self.max_pages:
+                return
+            if sm in seen or not _same_origin(self.base_url, sm):
+                continue
+            seen.add(sm)
+            try:
+                resp = await self._client.get(sm)
+            except Exception:
+                continue
+            if resp.status_code != 200 or "<loc" not in resp.text.lower():
+                continue
+            maps_fetched += 1
+            for loc in _LOC_RE.findall(resp.text)[:100]:
+                loc = loc.strip()
+                if not _same_origin(self.base_url, loc):
+                    continue
+                if loc.lower().endswith(".xml"):      # nested sitemap index
+                    if loc not in seen:
+                        candidates.append(loc)
+                    continue
+                if len(self._visited) >= self.max_pages:
+                    return
+                # depth=max_depth: record + parse the page, but don't deep-crawl
+                # further from a sitemap-enumerated URL.
+                await self._visit(loc, depth=self.max_depth)
+
+    async def _probe_common_paths(self) -> None:
+        """Directly GET a short, curated set of common admin/API/config paths.
+        Read-only; existence is confirmed by the response (404/410 are not
+        recorded). Respects robots when enabled, and is capped so it never
+        dominates the page budget."""
+        probes = 0
+        for p in _COMMON_PATHS:
+            if probes >= MAX_COMMON_PROBES or len(self._visited) >= self.max_pages:
+                return
+            url = urljoin(self.base_url + "/", p.lstrip("/"))
+            if url in self._visited:
+                continue
+            probes += 1
+            await self._visit(url, depth=self.max_depth)
 
     async def _visit(self, url: str, depth: int) -> None:
         if depth > self.max_depth:
@@ -168,6 +251,12 @@ class Crawler:
 
         trace = await self._fetch(url)
         if trace is None or trace.status == 0:
+            return
+        # A not-found/gone response is not a discovered endpoint - don't
+        # record it (important now that we probe common paths that often 404).
+        # 401/403 ARE recorded: the resource exists but is gated, which is a
+        # useful signal.
+        if trace.status in (404, 410):
             return
         self._traces.append(trace)
 
