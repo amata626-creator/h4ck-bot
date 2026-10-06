@@ -12,6 +12,44 @@
  */
 
 const API_BASE = "";                     // same-origin
+
+// Session gate: if any API call comes back 401 (session missing/expired),
+// bounce to the login page, preserving where we were so login can return us.
+(function installAuthRedirect() {
+  const orig = window.fetch;
+  window.fetch = async (...args) => {
+    const resp = await orig(...args);
+    if (resp.status === 401 && !location.pathname.startsWith("/login")) {
+      location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+    }
+    return resp;
+  };
+})();
+
+// Log out: drop the session cookie and return to the login page.
+async function h4ckLogout() {
+  try { await window.fetch("/api/logout", { method: "POST" }); } catch (_) {}
+  location.href = "/login";
+}
+
+// Add a "Log out" control to the top bar once the DOM is ready (only when
+// login is actually enabled on the server).
+document.addEventListener("DOMContentLoaded", async () => {
+  try {
+    const me = await (await window.fetch("/api/me")).json();
+    if (!me || !me.login_enabled) return;
+    const right = document.querySelector(".topbar-right") || document.querySelector(".topbar");
+    if (!right) return;
+    const btn = document.createElement("button");
+    btn.textContent = me.user ? `Log out (${me.user})` : "Log out";
+    btn.className = "logout-btn";
+    btn.style.cssText = "background:var(--bg-3);border:1px solid var(--border);color:var(--text-2);" +
+      "font-size:12px;padding:5px 10px;border-radius:6px;cursor:pointer;font-family:inherit;";
+    btn.addEventListener("click", h4ckLogout);
+    right.appendChild(btn);
+  } catch (_) {}
+});
+
 const POLL_MS = 1500;
 const DEFAULT_TARGET = "scanme.nmap.org";
 const DEFAULT_MODULES = ["discovery", "misconfig", "web_api", "owasp_top10"];

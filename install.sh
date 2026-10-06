@@ -83,6 +83,23 @@ else
   ok "generated a new admin token in .env (kept private, chmod 600)"
 fi
 
+# ── 5b. Dashboard session secret (for the login page) ──────────────
+say "Dashboard session secret (.env)"
+if [[ -f .env ]] && grep -q '^H4CK_BOT_SESSION_SECRET=.\+' .env; then
+  ok ".env already has a session secret — leaving it untouched"
+else
+  SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+  echo "H4CK_BOT_SESSION_SECRET=$SECRET" >> .env
+  chmod 600 .env
+  ok "generated a dashboard session secret"
+fi
+# The login gate turns on only once an admin PASSWORD is set. Nudge if not.
+if ! { [[ -f .env ]] && grep -q '^H4CK_BOT_ADMIN_PASSWORD_HASH=.\+' .env; }; then
+  warn "No dashboard password set yet — the login page is INACTIVE until you run:"
+  warn "    python backend/api/auth.py set-password admin"
+  warn "    sudo systemctl restart h4ckbot"
+fi
+
 # ── 6. Scope file (authorization boundary) ─────────────────────────
 say "Scope file (scope.yaml)"
 if [[ -f scope.yaml ]]; then

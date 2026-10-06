@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,8 +26,10 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+
+from api import auth
 from pydantic import BaseModel
 
 from core.orchestrator import Orchestrator
@@ -90,6 +93,44 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Paths reachable without a session (the login page itself, its API, and
+# liveness). Everything else is gated once login is configured.
+_AUTH_PUBLIC_PATHS = {"/login", "/api/login", "/api/logout", "/api/health", "/favicon.ico"}
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    """Single gate for the whole app. A request passes if it carries a valid
+    session cookie OR a valid admin bearer token. For a session user we inject
+    the admin bearer so the existing per-route token checks (writes) succeed
+    without the user pasting a token. Unauthenticated browsers are redirected
+    to /login; API clients get 401. The gate is a no-op until login is
+    configured, so a fresh deploy is never locked out before a password is set."""
+    path = request.url.path
+    if path in _AUTH_PUBLIC_PATHS or not auth.login_configured():
+        return await call_next(request)
+
+    # 1. valid session cookie?
+    if auth.verify_session(request.cookies.get(auth.SESSION_COOKIE)):
+        if not request.headers.get("authorization"):
+            admin_tok = os.environ.get("H4CK_BOT_ADMIN_TOKEN", "")
+            if admin_tok:
+                hdrs = [(k, v) for (k, v) in request.scope["headers"] if k != b"authorization"]
+                hdrs.append((b"authorization", f"Bearer {admin_tok}".encode()))
+                request.scope["headers"] = hdrs
+        return await call_next(request)
+
+    # 2. valid admin bearer token? (programmatic API clients)
+    authz = request.headers.get("authorization", "")
+    if authz.startswith("Bearer ") and verify_token(authz.split(" ", 1)[1]):
+        return await call_next(request)
+
+    # 3. unauthenticated
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse("/login", status_code=302)
+    return JSONResponse({"detail": "authentication required"}, status_code=401)
 
 
 # ── Persistence ─────────────────────────────────────────────────────
@@ -165,6 +206,46 @@ MODULE_REGISTRY = {
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/api/login")
+async def login(request: Request):
+    """Authenticate and set a signed session cookie. JSON body:
+    {"username": ..., "password": ...}. Rate-limited per client IP."""
+    ip = request.client.host if request.client else "?"
+    if auth.rate_limited(ip):
+        raise HTTPException(429, "too many login attempts - wait a few minutes")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    username = str(body.get("username", ""))
+    password = str(body.get("password", ""))
+    if auth.check_credentials(username, password):
+        auth.clear_attempts(ip)
+        resp = JSONResponse({"ok": True})
+        resp.set_cookie(
+            auth.SESSION_COOKIE, auth.make_session(username),
+            max_age=auth.SESSION_TTL, httponly=True, secure=True,
+            samesite="lax", path="/",
+        )
+        return resp
+    auth.record_attempt(ip)
+    raise HTTPException(401, "invalid username or password")
+
+
+@app.post("/api/logout")
+async def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.SESSION_COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/me")
+async def whoami(request: Request):
+    """Who the current session belongs to (used by the dashboard header)."""
+    user = auth.verify_session(request.cookies.get(auth.SESSION_COOKIE))
+    return {"user": user, "login_enabled": auth.login_configured()}
 
 
 @app.get("/api/scope")
@@ -653,6 +734,11 @@ async def redteam_approve(
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
 
 if _FRONTEND_DIR.is_dir():
+    @app.get("/login")
+    async def login_page():
+        lp = _FRONTEND_DIR / "login.html"
+        return FileResponse(lp if lp.is_file() else _FRONTEND_DIR / "index.html")
+
     @app.get("/")
     async def serve_index():
         return FileResponse(_FRONTEND_DIR / "index.html")

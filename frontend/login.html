@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>H4CK-B0T — Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg-0:#0D1117; --bg-1:#10151C; --bg-2:#151B23; --bg-3:#1B222C;
+  --border:#242C38; --border-strong:#313B49;
+  --text-1:#E6EAF0; --text-2:#9AA5B4; --text-3:#5E6B7D;
+  --accent:#4FD1C5; --accent-dim:#2b8b81; --crit:#E5484D; --crit-bg:#2A1518;
+  font-family:'Inter',-apple-system,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg-0);color:var(--text-1);height:100%}
+body{font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  display:flex;align-items:center;justify-content:center;padding:24px;
+  background-image:radial-gradient(900px 500px at 50% -10%, #11201f 0%, var(--bg-0) 60%);}
+.mono{font-family:'JetBrains Mono',monospace}
+.card{width:100%;max-width:380px;background:var(--bg-1);border:1px solid var(--border);
+  border-radius:14px;padding:30px 28px 26px;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+.brand{display:flex;align-items:center;gap:11px;margin-bottom:22px}
+.brand-mark{width:34px;height:34px;border-radius:9px;
+  background:linear-gradient(160deg,var(--accent),var(--accent-dim));
+  display:flex;align-items:center;justify-content:center;font-weight:700;color:#06201d;font-size:15px}
+.brand-name{font-weight:700;font-size:17px;letter-spacing:-.01em}
+.brand-sub{color:var(--text-3);font-size:12px;margin-top:1px}
+h1{font-size:15px;font-weight:600;margin-bottom:4px}
+.lede{color:var(--text-2);font-size:12.5px;margin-bottom:20px}
+label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--text-3);margin:0 0 6px 2px}
+.field{margin-bottom:15px}
+input{width:100%;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;
+  color:var(--text-1);font-size:14px;padding:11px 12px;outline:none;transition:border-color .15s}
+input:focus{border-color:var(--accent-dim)}
+button{width:100%;margin-top:4px;background:linear-gradient(160deg,var(--accent),var(--accent-dim));
+  color:#06201d;font-weight:700;font-size:14px;border:0;border-radius:8px;padding:12px;
+  cursor:pointer;transition:filter .15s}
+button:hover{filter:brightness(1.07)}
+button:disabled{opacity:.6;cursor:default}
+.err{display:none;margin-bottom:14px;padding:9px 11px;border-radius:7px;font-size:12.5px;
+  background:var(--crit-bg);border:1px solid #58242a;color:#f4a3a6}
+.err.show{display:block}
+.foot{margin-top:18px;text-align:center;color:var(--text-3);font-size:11px}
+.foot .mono{color:var(--text-2)}
+</style>
+</head>
+<body>
+  <form class="card" id="loginForm" autocomplete="on">
+    <div class="brand">
+      <div class="brand-mark">H4</div>
+      <div>
+        <div class="brand-name">H4CK-B0T</div>
+        <div class="brand-sub">VAPTIX AI · Security Validation</div>
+      </div>
+    </div>
+    <h1>Sign in</h1>
+    <div class="lede">Authorized operators only. All activity is logged.</div>
+
+    <div class="err" id="err"></div>
+
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" autofocus required>
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button id="submit" type="submit">Sign in</button>
+
+    <div class="foot">Protected console · <span class="mono">scan.vaptix.com</span></div>
+  </form>
+
+<script>
+const form = document.getElementById('loginForm');
+const err  = document.getElementById('err');
+const btn  = document.getElementById('submit');
+
+function showErr(msg){ err.textContent = msg; err.classList.add('show'); }
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  err.classList.remove('show');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  try {
+    const resp = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: document.getElementById('username').value,
+        password: document.getElementById('password').value,
+      }),
+    });
+    if (resp.ok) {
+      // follow ?next= if present, else dashboard
+      const next = new URLSearchParams(location.search).get('next') || '/';
+      location.href = next.startsWith('/') ? next : '/';
+      return;
+    }
+    if (resp.status === 429) showErr('Too many attempts. Wait a few minutes and try again.');
+    else showErr('Invalid username or password.');
+  } catch (_) {
+    showErr('Could not reach the server. Try again.');
+  }
+  btn.disabled = false; btn.textContent = 'Sign in';
+});
+</script>
+</body>
+</html>
