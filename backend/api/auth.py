@@ -157,6 +157,7 @@ def _cli_set_password(username: str) -> None:
     if pw != pw2 or not pw:
         raise SystemExit("passwords did not match (or empty) - aborted")
 
+    pw_hash = hash_password(pw)
     path = _env_path()
     lines = []
     if os.path.exists(path):
@@ -164,7 +165,7 @@ def _cli_set_password(username: str) -> None:
             lines = [ln.rstrip("\n") for ln in f if ln.strip()]
 
     lines = _set_env_line(lines, "H4CK_BOT_ADMIN_USER", username)
-    lines = _set_env_line(lines, "H4CK_BOT_ADMIN_PASSWORD_HASH", hash_password(pw))
+    lines = _set_env_line(lines, "H4CK_BOT_ADMIN_PASSWORD_HASH", pw_hash)
     if not any(ln.startswith("H4CK_BOT_SESSION_SECRET=") for ln in lines):
         lines = _set_env_line(lines, "H4CK_BOT_SESSION_SECRET", secrets.token_urlsafe(48))
 
@@ -172,6 +173,25 @@ def _cli_set_password(username: str) -> None:
         f.write("\n".join(lines) + "\n")
     os.chmod(path, 0o600)
     print(f"Set login for user '{username}' in {path}")
+
+    # Once a user exists in the DB, login checks the DB (not .env). So keep
+    # them in sync: if this username is already a DB account, update its hash
+    # too, otherwise the new password would silently not take effect.
+    try:
+        import sqlite3
+        root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        db = os.path.join(root, "data", "h4ckbot.db")
+        if os.path.exists(db):
+            con = sqlite3.connect(db)
+            cur = con.execute(
+                "UPDATE users SET password_hash=? WHERE username=?", (pw_hash, username)
+            )
+            con.commit(); con.close()
+            if cur.rowcount:
+                print(f"Also updated the existing DB account '{username}'.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"note: could not update DB account ({exc}); it will use its existing password")
+
     print("Restart the service for it to take effect:  sudo systemctl restart h4ckbot")
 
 
