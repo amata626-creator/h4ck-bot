@@ -16,7 +16,9 @@ say "Running installer (idempotent)"
 ./install.sh
 
 say "Restarting service"
-if systemctl list-unit-files 2>/dev/null | grep -q '^h4ckbot\.service'; then
+# `systemctl cat` finds the unit whether or not it has a persistent unit
+# file (list-unit-files misses runtime/transient units).
+if systemctl cat h4ckbot >/dev/null 2>&1; then
   sudo systemctl restart h4ckbot
   sleep 3
   systemctl is-active h4ckbot
