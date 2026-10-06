@@ -25,7 +25,7 @@ import asyncio
 import re
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import urljoin, urlparse, urldefrag, parse_qsl
 
 import httpx
 
@@ -75,6 +75,15 @@ def _normalize_path(path: str) -> str:
 def _same_origin(base: str, url: str) -> bool:
     b, u = urlparse(base), urlparse(url)
     return (b.scheme, b.hostname, b.port) == (u.scheme, u.hostname, u.port)
+
+
+def _query_names(query: str) -> list[str]:
+    """Ordered, de-duplicated parameter names from a URL query string."""
+    names: list[str] = []
+    for k, _ in parse_qsl(query, keep_blank_values=True):
+        if k and k not in names:
+            names.append(k)
+    return names
 
 
 class Crawler:
@@ -162,12 +171,15 @@ class Crawler:
             return
         self._traces.append(trace)
 
-        # Record the URL itself as a discovered endpoint
-        path = urlparse(url).path or "/"
+        # Record the URL itself as a discovered endpoint, including any
+        # query-string parameters it carries.
+        parsed_url = urlparse(url)
+        path = parsed_url.path or "/"
         self._endpoints.append(Endpoint(
             path=_normalize_path(path),
             methods=[trace.method],
             discovered_from="crawl",
+            params=_query_names(parsed_url.query),
             content_type=trace.response_headers.get("content-type", ""),
         ))
 
@@ -196,12 +208,24 @@ class Crawler:
                                   else "application/x-www-form-urlencoded"),
                 ))
 
-            # Links
+            # Links: a link carrying a query string is recorded as a GET
+            # endpoint with those param names even if never visited.
             links = _LINK_HREF_RE.findall(body)
             for href in links:
                 full = urljoin(url, href)
-                if _same_origin(self.base_url, full):
-                    await self._visit(full, depth=depth + 1)
+                if not _same_origin(self.base_url, full):
+                    continue
+                lp = urlparse(full)
+                qnames = _query_names(lp.query)
+                if qnames:
+                    self._endpoints.append(Endpoint(
+                        path=_normalize_path(lp.path or "/"),
+                        methods=["GET"],
+                        discovered_from="link",
+                        params=qnames,
+                        content_type="text/html",
+                    ))
+                await self._visit(full, depth=depth + 1)
 
             # Script bundles
             for src in _SCRIPT_SRC_RE.findall(body):
