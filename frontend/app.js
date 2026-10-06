@@ -43,25 +43,54 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     const me = await (await window.fetch("/api/me")).json();
     if (!me || !me.login_enabled) return;
-    const right = document.querySelector(".topbar-right") || document.querySelector(".topbar");
-    if (!right) return;
-
-    if (me.role === "admin") {
-      buildUsersModal();
-      const ub = document.createElement("button");
-      ub.textContent = "Users";
-      ub.style.cssText = _btnCss;
-      ub.addEventListener("click", openUsersModal);
-      right.appendChild(ub);
-    }
-
-    const lo = document.createElement("button");
-    lo.textContent = me.user ? `Log out (${me.user})` : "Log out";
-    lo.style.cssText = _btnCss;
-    lo.addEventListener("click", h4ckLogout);
-    right.appendChild(lo);
+    if (me.role === "admin") buildUsersModal();
+    installAccountMenu(me);
   } catch (_) {}
 });
+
+// Compact account menu anchored on the existing avatar (no extra top-bar
+// width - the top bar is already dense). Avatar shows the user's initials;
+// clicking it opens a dropdown with Users (admins) and Log out.
+function installAccountMenu(me) {
+  const avatar = document.querySelector(".avatar");
+  if (!avatar) return;
+  const initials = (me.user || "OP").replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "OP";
+  avatar.textContent = initials;
+  avatar.style.cursor = "pointer";
+  avatar.title = (me.user || "") + (me.role ? " · " + me.role : "");
+
+  const menu = document.createElement("div");
+  menu.id = "acct-menu";
+  menu.style.cssText = "position:fixed;top:46px;right:14px;min-width:180px;background:var(--bg-2);" +
+    "border:1px solid var(--border-strong);border-radius:9px;padding:6px;z-index:1200;display:none;" +
+    "box-shadow:0 12px 32px rgba(0,0,0,.5);";
+  const head = document.createElement("div");
+  head.style.cssText = "padding:7px 9px 9px;border-bottom:1px solid var(--border);margin-bottom:5px;";
+  head.innerHTML = '<div style="font-weight:600;font-size:12.5px;">' + escapeHtml(me.user || "operator") + '</div>' +
+    '<div style="font-size:11px;color:var(--text-3);margin-top:1px;">' + escapeHtml(me.role || "operator") + '</div>';
+  menu.appendChild(head);
+
+  const item = (label, fn) => {
+    const el = document.createElement("div");
+    el.textContent = label;
+    el.style.cssText = "padding:8px 9px;border-radius:6px;font-size:12.5px;color:var(--text-2);cursor:pointer;";
+    el.addEventListener("mouseenter", () => { el.style.background = "var(--bg-3)"; el.style.color = "var(--text-1)"; });
+    el.addEventListener("mouseleave", () => { el.style.background = ""; el.style.color = "var(--text-2)"; });
+    el.addEventListener("click", () => { menu.style.display = "none"; fn(); });
+    menu.appendChild(el);
+  };
+  if (me.role === "admin") item("Manage users", openUsersModal);
+  item("Log out", h4ckLogout);
+  document.body.appendChild(menu);
+
+  avatar.addEventListener("click", (e) => {
+    e.stopPropagation();
+    menu.style.display = menu.style.display === "none" ? "block" : "none";
+  });
+  document.addEventListener("click", (e) => {
+    if (e.target !== avatar && !menu.contains(e.target)) menu.style.display = "none";
+  });
+}
 
 // ── Admin Users panel (injected modal) ──────────────────────────────
 function buildUsersModal() {
