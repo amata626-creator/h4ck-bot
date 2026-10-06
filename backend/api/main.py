@@ -234,8 +234,15 @@ _USERNAME_RE = _re.compile(r"^[A-Za-z0-9._-]{3,32}$")
 # ── Request/response models ─────────────────────────────────────────
 class RunAssessmentRequest(BaseModel):
     target: str
-    modules: list[str] = ["discovery", "misconfig", "web_api", "owasp_top10"]
-    llm_model: str = "llama3.1"
+    modules: list[str] = ["discovery", "misconfig"]
+    llm_model: str = "qwen2.5:3b"
+    # Run the AI red-team engine (deep recon -> grounded hypotheses ->
+    # non-destructive executors -> validation) after the classic modules,
+    # under the same assessment. This is what makes "Start scan" actually
+    # exercise the engine instead of just the legacy modules.
+    full_engine: bool = True
+    automation_level: str = "autonomous"
+    llm_timeout: float = 300.0
 
 
 class RunAssessmentResponse(BaseModel):
@@ -495,6 +502,24 @@ async def _run_assessment_task(
             finding.status = finding.validation.status
             _STORE.insert_finding(assessment_id, finding)
 
+        # Full engine: run the AI red-team loop on the same target/assessment,
+        # so one "Start scan" produces recon-grounded, executor-confirmed,
+        # validated findings - not just the legacy modules' output. Isolated
+        # in its own try so an engine hiccup never discards the classic
+        # findings already stored.
+        if getattr(req, "full_engine", False):
+            try:
+                rt_findings = await _run_redteam_pipeline(
+                    assessment_id, req.target, roe,
+                    getattr(req, "automation_level", "autonomous"),
+                    req.llm_model, getattr(req, "llm_timeout", 300.0),
+                )
+                logger.info("assessment %s: red-team engine added %d findings",
+                            assessment_id, len(rt_findings))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("assessment %s: red-team engine failed (classic "
+                                 "findings kept): %s", assessment_id, exc)
+
         _STORE.set_status(assessment_id, "complete")
     except Exception as exc:
         logger.exception("assessment %s failed", assessment_id)
@@ -750,63 +775,67 @@ async def redteam_assess(
     return RunAssessmentResponse(assessment_id=assessment_id)
 
 
+async def _run_redteam_pipeline(
+    assessment_id: str, target: str, roe, automation_level: str,
+    llm_model: str, llm_timeout: float = 300.0,
+) -> list[Finding]:
+    """Run the full red-team engine (recon -> semantic -> hypotheses -> gated
+    plan -> executors -> validation), persist its findings, and record the
+    plan. Returns the findings. Raises on hard failure (e.g. recon empty);
+    the caller decides how to surface that. Reused by the standalone red-team
+    endpoint AND the dashboard's full-engine scan."""
+    asset = Asset(asset_id="a0", name=target, asset_type="host",
+                  scope_approved=True, metadata={"exposure": "internet"})
+
+    # 1. recon (ReconModule stashes the ReconResult on ctx.config)
+    ctx = ModuleRunContext(assessment_id=assessment_id, assets=[asset], roe=roe,
+                           automation_level=automation_level, config={})
+    async for _ in ReconModule().run(ctx):
+        pass
+    recon = ctx.config.get("recon_results", {}).get("a0")
+    if recon is None:
+        raise RuntimeError("recon produced no result")
+
+    # 2. semantic model (local LLM). Degrade gracefully on timeout/failure to
+    # recon-only hypotheses (injection/XSS/auth still generated).
+    try:
+        semantic = await SemanticModelBuilder(model=llm_model, timeout=llm_timeout).build(recon)
+    except Exception as exc:  # noqa: BLE001
+        from semantic.types import SemanticModel
+        logger.warning("redteam %s: semantic model unavailable (%s) - recon-only",
+                       assessment_id, exc)
+        semantic = SemanticModel(target=target, unknowns=[f"semantic model unavailable: {exc}"])
+
+    # 3. reason + plan + run AUTO steps, validate, store
+    base_url = (recon.base_urls or [f"https://{target}"])[0]
+    orch = RedTeamOrchestrator(
+        _REDTEAM_REGISTRY, default_pipeline(llm_client=OllamaClient(model=llm_model)),
+    )
+    factory = _make_exec_factory(semantic, roe, base_url)
+    result = await orch.assess(
+        assessment_id=assessment_id, target=target, roe=roe,
+        automation_level=automation_level, recon=recon,
+        semantic=semantic, exec_factory=factory,
+    )
+    for f in result.findings:
+        _STORE.insert_finding(assessment_id, f)
+    _REDTEAM[assessment_id] = {
+        "plan": result.plan, "semantic": semantic, "roe": roe,
+        "base_url": base_url, "llm_model": llm_model,
+        "pending": {s.hypothesis.hypothesis_id: s for s in result.plan.pending},
+    }
+    logger.info("redteam pipeline %s: %d findings, plan=%s",
+                assessment_id, len(result.findings), result.plan.summary().get("counts"))
+    return result.findings
+
+
 async def _run_redteam_task(assessment_id: str, req: RunRedTeamRequest) -> None:
     try:
         roe = build_roe(assessment_id, req.target, _SCOPE)
-        asset = Asset(asset_id="a0", name=req.target, asset_type="host",
-                      scope_approved=True, metadata={"exposure": "internet"})
-
-        # 1. recon (ReconModule stashes the ReconResult on ctx.config)
-        ctx = ModuleRunContext(assessment_id=assessment_id, assets=[asset], roe=roe,
-                               automation_level=req.automation_level, config={})
-        async for _ in ReconModule().run(ctx):
-            pass
-        recon = ctx.config.get("recon_results", {}).get("a0")
-        if recon is None:
-            _STORE.set_status(assessment_id, "error: recon produced no result", error="recon empty")
-            return
-
-        # 2. semantic model (local LLM). If it fails or times out, degrade
-        # gracefully to recon-only hypotheses rather than failing the whole
-        # assessment — the loop still produces injection/XSS/auth hypotheses;
-        # only the semantic-dependent ones (BOLA/mass-assignment) are skipped.
-        try:
-            semantic = await SemanticModelBuilder(
-                model=req.llm_model, timeout=req.llm_timeout,
-            ).build(recon)
-        except Exception as exc:  # noqa: BLE001 - LLM slow/down/invalid output
-            from semantic.types import SemanticModel
-            logger.warning(
-                "redteam %s: semantic model unavailable (%s) - continuing "
-                "recon-only (no BOLA/mass-assignment hypotheses this run)",
-                assessment_id, exc,
-            )
-            semantic = SemanticModel(target=req.target,
-                                     unknowns=[f"semantic model unavailable: {exc}"])
-
-        # 3. reason + plan + run AUTO steps, validate, store
-        base_url = (recon.base_urls or [f"https://{req.target}"])[0]
-        orch = RedTeamOrchestrator(
-            _REDTEAM_REGISTRY,
-            default_pipeline(llm_client=OllamaClient(model=req.llm_model)),
+        await _run_redteam_pipeline(
+            assessment_id, req.target, roe, req.automation_level,
+            req.llm_model, req.llm_timeout,
         )
-        factory = _make_exec_factory(semantic, roe, base_url)
-        result = await orch.assess(
-            assessment_id=assessment_id, target=req.target, roe=roe,
-            automation_level=req.automation_level, recon=recon,
-            semantic=semantic, exec_factory=factory,
-        )
-        for f in result.findings:
-            _STORE.insert_finding(assessment_id, f)
-
-        _REDTEAM[assessment_id] = {
-            "plan": result.plan,
-            "semantic": semantic,
-            "roe": roe,
-            "base_url": base_url,
-            "llm_model": req.llm_model,
-            "pending": {s.hypothesis.hypothesis_id: s for s in result.plan.pending},
-        }
         _STORE.set_status(assessment_id, "complete")
     except Exception as exc:  # noqa: BLE001
         logger.exception("redteam assessment %s failed", assessment_id)

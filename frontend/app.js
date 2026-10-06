@@ -209,7 +209,7 @@ function escapeHtml(s) {
 
 const POLL_MS = 1500;
 const DEFAULT_TARGET = "scanme.nmap.org";
-const DEFAULT_MODULES = ["discovery", "misconfig", "web_api", "owasp_top10"];
+const DEFAULT_MODULES = ["discovery", "misconfig"];  // red-team engine runs on top (full_engine)
 
 // ── State ───────────────────────────────────────────────────────────
 let assessmentId = null;
@@ -797,7 +797,7 @@ async function boot() {
 
 async function startScanFromForm() {
   const target = ($("#target-input")?.value || "").trim();
-  const llmModel = ($("#llm-model")?.value || "llama3.1").trim() || "llama3.1";
+  const llmModel = ($("#llm-model")?.value || "qwen2.5:3b").trim() || "qwen2.5:3b";
 
   if (!target) {
     alert("Enter a target hostname or IP.");
