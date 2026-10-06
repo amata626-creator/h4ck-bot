@@ -32,23 +32,151 @@ async function h4ckLogout() {
   location.href = "/login";
 }
 
-// Add a "Log out" control to the top bar once the DOM is ready (only when
-// login is actually enabled on the server).
+// Top-bar account controls: a "Users" button (admins only) and "Log out",
+// added once the DOM is ready and only when login is enabled on the server.
+const _btnCss = "background:var(--bg-3);border:1px solid var(--border);color:var(--text-2);" +
+  "font-size:12px;padding:5px 10px;border-radius:6px;cursor:pointer;font-family:inherit;";
+const _inCss = "background:var(--bg-3);border:1px solid var(--border);color:var(--text-1);" +
+  "font-size:13px;padding:8px 10px;border-radius:7px;font-family:inherit;outline:none;";
+
 document.addEventListener("DOMContentLoaded", async () => {
   try {
     const me = await (await window.fetch("/api/me")).json();
     if (!me || !me.login_enabled) return;
     const right = document.querySelector(".topbar-right") || document.querySelector(".topbar");
     if (!right) return;
-    const btn = document.createElement("button");
-    btn.textContent = me.user ? `Log out (${me.user})` : "Log out";
-    btn.className = "logout-btn";
-    btn.style.cssText = "background:var(--bg-3);border:1px solid var(--border);color:var(--text-2);" +
-      "font-size:12px;padding:5px 10px;border-radius:6px;cursor:pointer;font-family:inherit;";
-    btn.addEventListener("click", h4ckLogout);
-    right.appendChild(btn);
+
+    if (me.role === "admin") {
+      buildUsersModal();
+      const ub = document.createElement("button");
+      ub.textContent = "Users";
+      ub.style.cssText = _btnCss;
+      ub.addEventListener("click", openUsersModal);
+      right.appendChild(ub);
+    }
+
+    const lo = document.createElement("button");
+    lo.textContent = me.user ? `Log out (${me.user})` : "Log out";
+    lo.style.cssText = _btnCss;
+    lo.addEventListener("click", h4ckLogout);
+    right.appendChild(lo);
   } catch (_) {}
 });
+
+// ── Admin Users panel (injected modal) ──────────────────────────────
+function buildUsersModal() {
+  if (document.getElementById("users-modal")) return;
+  const m = document.createElement("div");
+  m.id = "users-modal";
+  m.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;" +
+    "align-items:center;justify-content:center;z-index:1000;";
+  m.innerHTML =
+    '<div style="width:540px;max-width:92vw;max-height:86vh;overflow:auto;background:var(--bg-1);' +
+    'border:1px solid var(--border);border-radius:12px;padding:20px 22px;">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">' +
+        '<div style="font-weight:600;font-size:15px;">Users</div>' +
+        '<button id="um-close" style="' + _btnCss + '">Close</button>' +
+      '</div>' +
+      '<div id="um-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px;"></div>' +
+      '<div style="border-top:1px solid var(--border);padding-top:14px;">' +
+        '<div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-3);margin-bottom:9px;">Add user</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">' +
+          '<input id="um-user" placeholder="username" style="' + _inCss + 'flex:1;min-width:120px;">' +
+          '<input id="um-pass" type="password" placeholder="password (min 8)" style="' + _inCss + 'flex:1;min-width:120px;">' +
+          '<select id="um-role" style="' + _inCss + '"><option value="operator">operator</option><option value="admin">admin</option></select>' +
+          '<button id="um-add" style="background:linear-gradient(160deg,var(--validated),#2b8b81);color:#06201d;' +
+            'font-weight:600;border:0;border-radius:7px;padding:9px 14px;cursor:pointer;font-family:inherit;">Add</button>' +
+        '</div>' +
+        '<div id="um-msg" style="margin-top:9px;font-size:12px;color:var(--text-2);min-height:16px;"></div>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(m);
+  m.addEventListener("click", (e) => { if (e.target === m) closeUsersModal(); });
+  document.getElementById("um-close").addEventListener("click", closeUsersModal);
+  document.getElementById("um-add").addEventListener("click", addUser);
+}
+
+function openUsersModal() {
+  const m = document.getElementById("users-modal");
+  if (m) { m.style.display = "flex"; loadUsers(); }
+}
+function closeUsersModal() {
+  const m = document.getElementById("users-modal");
+  if (m) m.style.display = "none";
+}
+
+async function loadUsers() {
+  const list = document.getElementById("um-list");
+  list.innerHTML = '<div style="color:var(--text-3);font-size:12px;">Loading…</div>';
+  try {
+    const data = await (await window.fetch("/api/users")).json();
+    const users = (data && data.users) || [];
+    list.innerHTML = "";
+    users.forEach((u) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-2);" +
+        "border:1px solid var(--border);border-radius:8px;";
+      const badge = u.role === "admin"
+        ? '<span style="font-size:10px;color:var(--validated);border:1px solid #2b8b81;border-radius:4px;padding:1px 6px;">admin</span>'
+        : '<span style="font-size:10px;color:var(--text-3);border:1px solid var(--border-strong);border-radius:4px;padding:1px 6px;">operator</span>';
+      row.innerHTML =
+        '<span style="font-weight:500;">' + escapeHtml(u.username) + '</span>' + badge +
+        '<span style="margin-left:auto;color:var(--text-3);font-size:11px;">' +
+          (u.active ? "" : "disabled") + '</span>';
+      const del = document.createElement("button");
+      del.textContent = "Remove";
+      del.style.cssText = "background:var(--crit-bg);border:1px solid #58242a;color:#f4a3a6;" +
+        "font-size:11px;padding:4px 9px;border-radius:6px;cursor:pointer;font-family:inherit;";
+      del.addEventListener("click", () => deleteUser(u.username));
+      row.appendChild(del);
+      list.appendChild(row);
+    });
+    if (!users.length) list.innerHTML = '<div style="color:var(--text-3);font-size:12px;">No users.</div>';
+  } catch (_) {
+    list.innerHTML = '<div style="color:#f4a3a6;font-size:12px;">Could not load users.</div>';
+  }
+}
+
+async function addUser() {
+  const msg = document.getElementById("um-msg");
+  const username = document.getElementById("um-user").value.trim();
+  const password = document.getElementById("um-pass").value;
+  const role = document.getElementById("um-role").value;
+  msg.style.color = "var(--text-2)"; msg.textContent = "Adding…";
+  try {
+    const resp = await window.fetch("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, role }),
+    });
+    if (resp.ok) {
+      document.getElementById("um-user").value = "";
+      document.getElementById("um-pass").value = "";
+      msg.style.color = "var(--validated)"; msg.textContent = "User added.";
+      loadUsers();
+    } else {
+      const e = await resp.json().catch(() => ({}));
+      msg.style.color = "#f4a3a6"; msg.textContent = e.detail || ("Failed (" + resp.status + ")");
+    }
+  } catch (_) {
+    msg.style.color = "#f4a3a6"; msg.textContent = "Request failed.";
+  }
+}
+
+async function deleteUser(username) {
+  if (!confirm("Remove user '" + username + "'?")) return;
+  const msg = document.getElementById("um-msg");
+  try {
+    const resp = await window.fetch("/api/users/" + encodeURIComponent(username), { method: "DELETE" });
+    if (resp.ok) { msg.style.color = "var(--text-2)"; msg.textContent = "Removed " + username + "."; loadUsers(); }
+    else { const e = await resp.json().catch(() => ({})); msg.style.color = "#f4a3a6"; msg.textContent = e.detail || "Failed."; }
+  } catch (_) { msg.style.color = "#f4a3a6"; msg.textContent = "Request failed."; }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
 
 const POLL_MS = 1500;
 const DEFAULT_TARGET = "scanme.nmap.org";

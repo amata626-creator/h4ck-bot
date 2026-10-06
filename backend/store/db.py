@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS findings (
 
 CREATE INDEX IF NOT EXISTS idx_findings_assessment
     ON findings(assessment_id, discovered_at);
+
+CREATE TABLE IF NOT EXISTS users (
+    username      TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'operator',  -- 'admin' | 'operator'
+    active        INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL
+);
 """
 
 
@@ -131,6 +139,62 @@ class Store:
             d["modules"] = json.loads(d["modules"])
             out.append(d)
         return out
+
+    # ── users (dashboard accounts) ───────────────────────────────
+
+    def add_user(self, username: str, password_hash: str, role: str = "operator") -> bool:
+        """Create a user. Returns False if the username already exists."""
+        try:
+            with self._lock, self._connect() as con:
+                con.execute(
+                    "INSERT INTO users (username, password_hash, role, active, created_at) "
+                    "VALUES (?, ?, ?, 1, ?)",
+                    (username, password_hash, role, datetime.now(timezone.utc).isoformat()),
+                )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def get_user(self, username: str) -> dict | None:
+        with self._connect() as con:
+            row = con.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        return dict(row) if row else None
+
+    def list_users(self) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT username, role, active, created_at FROM users ORDER BY created_at"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_user(self, username: str) -> bool:
+        with self._lock, self._connect() as con:
+            cur = con.execute("DELETE FROM users WHERE username=?", (username,))
+        return cur.rowcount > 0
+
+    def set_user_password(self, username: str, password_hash: str) -> bool:
+        with self._lock, self._connect() as con:
+            cur = con.execute(
+                "UPDATE users SET password_hash=? WHERE username=?", (password_hash, username)
+            )
+        return cur.rowcount > 0
+
+    def set_user_active(self, username: str, active: bool) -> bool:
+        with self._lock, self._connect() as con:
+            cur = con.execute(
+                "UPDATE users SET active=? WHERE username=?", (1 if active else 0, username)
+            )
+        return cur.rowcount > 0
+
+    def count_users(self) -> int:
+        with self._connect() as con:
+            return con.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+
+    def count_admins(self) -> int:
+        with self._connect() as con:
+            return con.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role='admin' AND active=1"
+            ).fetchone()["c"]
 
     # ── findings ─────────────────────────────────────────────────
 

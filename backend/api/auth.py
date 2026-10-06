@@ -94,15 +94,17 @@ def check_credentials(username: str, password: str) -> bool:
 
 
 # ── signed session token ────────────────────────────────────────────
-def make_session(username: str, ttl: int = SESSION_TTL) -> str:
+def make_session(username: str, role: str = "operator", ttl: int = SESSION_TTL) -> str:
     secret = _session_secret().encode()
-    payload = {"u": username, "exp": int(time.time()) + ttl}
+    payload = {"u": username, "r": role, "exp": int(time.time()) + ttl}
     body = _b64e(json.dumps(payload, separators=(",", ":")).encode())
     sig = _b64e(hmac.new(secret, body.encode(), hashlib.sha256).digest())
     return f"{body}.{sig}"
 
 
-def verify_session(token: Optional[str]) -> Optional[str]:
+def verify_session(token: Optional[str]) -> Optional[dict]:
+    """Return the session payload {"u": username, "r": role} if the token is
+    valid and unexpired, else None."""
     secret = _session_secret().encode()
     if not token or not secret:
         return None
@@ -114,7 +116,7 @@ def verify_session(token: Optional[str]) -> Optional[str]:
         payload = json.loads(_b64d(body))
         if int(payload.get("exp", 0)) < int(time.time()):
             return None
-        return payload.get("u")
+        return {"u": payload.get("u"), "r": payload.get("r", "operator")}
     except Exception:
         return None
 

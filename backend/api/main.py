@@ -109,7 +109,7 @@ async def auth_gate(request: Request, call_next):
     to /login; API clients get 401. The gate is a no-op until login is
     configured, so a fresh deploy is never locked out before a password is set."""
     path = request.url.path
-    if path in _AUTH_PUBLIC_PATHS or not auth.login_configured():
+    if path in _AUTH_PUBLIC_PATHS or not _login_enabled():
         return await call_next(request)
 
     # 1. valid session cookie?
@@ -175,6 +175,62 @@ except RuntimeError as exc:
     raise
 
 
+# ── Dashboard accounts (multi-user) ─────────────────────────────────
+# Users live in the `users` table. The .env admin (H4CK_BOT_ADMIN_USER /
+# _PASSWORD_HASH) is a bootstrap account: on first start it is seeded into
+# the table as an 'admin' so it is visible and manageable like any other.
+try:
+    if _STORE.count_users() == 0 and auth._password_hash():
+        _STORE.add_user(auth.admin_user(), auth._password_hash(), role="admin")
+        logger.info("seeded bootstrap admin '%s' into users table", auth.admin_user())
+except Exception as exc:  # noqa: BLE001
+    logger.warning("user bootstrap skipped: %s", exc)
+
+
+def _login_enabled() -> bool:
+    """The login gate is live once a session secret exists AND there is at
+    least one credential (a DB user, or the .env bootstrap admin)."""
+    if not auth._session_secret():
+        return False
+    if auth._password_hash():
+        return True
+    try:
+        return _STORE.count_users() > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _authenticate(username: str, password: str) -> Optional[str]:
+    """Return the caller's role if credentials are valid, else None.
+    A username that exists in the DB is checked ONLY against the DB (no
+    stale .env fallback); otherwise the .env bootstrap admin is tried."""
+    u = _STORE.get_user(username)
+    if u is not None:
+        if u["active"] and auth.verify_password(password, u["password_hash"]):
+            return u["role"]
+        return None
+    if auth.check_credentials(username, password):
+        return "admin"
+    return None
+
+
+def _caller_is_admin(request: Request) -> bool:
+    """Admin if the session role is admin, or a valid admin bearer token is
+    presented (the bearer token is full-power by definition)."""
+    sess = auth.verify_session(request.cookies.get(auth.SESSION_COOKIE))
+    if sess and sess.get("r") == "admin":
+        return True
+    authz = request.headers.get("authorization", "")
+    if authz.startswith("Bearer ") and verify_token(authz.split(" ", 1)[1]):
+        return True
+    return False
+
+
+_VALID_ROLES = {"admin", "operator"}
+import re as _re
+_USERNAME_RE = _re.compile(r"^[A-Za-z0-9._-]{3,32}$")
+
+
 # ── Request/response models ─────────────────────────────────────────
 class RunAssessmentRequest(BaseModel):
     target: str
@@ -221,11 +277,12 @@ async def login(request: Request):
         body = {}
     username = str(body.get("username", ""))
     password = str(body.get("password", ""))
-    if auth.check_credentials(username, password):
+    role = _authenticate(username, password)
+    if role:
         auth.clear_attempts(ip)
-        resp = JSONResponse({"ok": True})
+        resp = JSONResponse({"ok": True, "role": role})
         resp.set_cookie(
-            auth.SESSION_COOKIE, auth.make_session(username),
+            auth.SESSION_COOKIE, auth.make_session(username, role),
             max_age=auth.SESSION_TTL, httponly=True, secure=True,
             samesite="lax", path="/",
         )
@@ -244,8 +301,78 @@ async def logout():
 @app.get("/api/me")
 async def whoami(request: Request):
     """Who the current session belongs to (used by the dashboard header)."""
-    user = auth.verify_session(request.cookies.get(auth.SESSION_COOKIE))
-    return {"user": user, "login_enabled": auth.login_configured()}
+    sess = auth.verify_session(request.cookies.get(auth.SESSION_COOKIE))
+    return {
+        "user": sess["u"] if sess else None,
+        "role": sess["r"] if sess else None,
+        "login_enabled": _login_enabled(),
+    }
+
+
+# ── User management (admin only) ────────────────────────────────────
+@app.get("/api/users")
+async def list_users(request: Request):
+    if not _caller_is_admin(request):
+        raise HTTPException(403, "admin role required")
+    return {"users": _STORE.list_users()}
+
+
+@app.post("/api/users", status_code=201)
+async def create_user(request: Request):
+    if not _caller_is_admin(request):
+        raise HTTPException(403, "admin role required")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    role = str(body.get("role", "operator")).strip() or "operator"
+    if not _USERNAME_RE.match(username):
+        raise HTTPException(400, "username must be 3-32 chars: letters, digits, . _ -")
+    if len(password) < 8:
+        raise HTTPException(400, "password must be at least 8 characters")
+    if role not in _VALID_ROLES:
+        raise HTTPException(400, f"role must be one of {sorted(_VALID_ROLES)}")
+    if not _STORE.add_user(username, auth.hash_password(password), role):
+        raise HTTPException(409, "a user with that username already exists")
+    logger.info("user created: %s (role=%s)", username, role)
+    return {"ok": True, "username": username, "role": role}
+
+
+@app.delete("/api/users/{username}")
+async def remove_user(username: str, request: Request):
+    if not _caller_is_admin(request):
+        raise HTTPException(403, "admin role required")
+    u = _STORE.get_user(username)
+    if u is None:
+        raise HTTPException(404, "no such user")
+    if u["role"] == "admin" and _STORE.count_admins() <= 1:
+        raise HTTPException(409, "cannot delete the last admin account")
+    _STORE.delete_user(username)
+    logger.info("user deleted: %s", username)
+    return {"ok": True}
+
+
+@app.post("/api/users/{username}/password")
+async def reset_user_password(username: str, request: Request):
+    """Admins may reset anyone's password; a user may change their own."""
+    sess = auth.verify_session(request.cookies.get(auth.SESSION_COOKIE))
+    self_change = bool(sess and sess.get("u") == username)
+    if not (_caller_is_admin(request) or self_change):
+        raise HTTPException(403, "not permitted")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    password = str(body.get("password", ""))
+    if len(password) < 8:
+        raise HTTPException(400, "password must be at least 8 characters")
+    if not _STORE.get_user(username):
+        raise HTTPException(404, "no such user")
+    _STORE.set_user_password(username, auth.hash_password(password))
+    logger.info("password reset for user: %s", username)
+    return {"ok": True}
 
 
 @app.get("/api/scope")
