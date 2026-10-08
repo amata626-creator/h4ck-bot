@@ -251,7 +251,7 @@ function statusLabel(status, findingKind) {
 }
 
 // ── API ─────────────────────────────────────────────────────────────
-async function startAssessment(target, modules, llmModel) {
+async function startAssessment(target, modules, llmModel, authCookie) {
   // /api/assessments/run is gated by the same admin token as the
   // proposal endpoints. The token is read from sessionStorage (set
   // when the user pastes it in the Propose form). If it's missing,
@@ -264,7 +264,10 @@ async function startAssessment(target, modules, llmModel) {
   const resp = await fetch(`${API_BASE}/api/assessments/run`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ target, modules, llm_model: llmModel }),
+    body: JSON.stringify({
+      target, modules, llm_model: llmModel,
+      ...(authCookie ? { auth_cookie: authCookie } : {}),
+    }),
   });
   if (!resp.ok) {
     const text = await resp.text();
@@ -798,6 +801,7 @@ async function boot() {
 async function startScanFromForm() {
   const target = ($("#target-input")?.value || "").trim();
   const llmModel = ($("#llm-model")?.value || "qwen2.5:3b").trim() || "qwen2.5:3b";
+  const authCookie = ($("#auth-cookie")?.value || "").trim();
 
   if (!target) {
     alert("Enter a target hostname or IP.");
@@ -808,7 +812,7 @@ async function startScanFromForm() {
   try {
     updateRunBadge("running", 0);
     const rpt = $("#view-report"); if (rpt) rpt.disabled = false;
-    assessmentId = await startAssessment(target, DEFAULT_MODULES, llmModel);
+    assessmentId = await startAssessment(target, DEFAULT_MODULES, llmModel, authCookie);
     findings = [];
     selectedFindingId = null;
     renderStats();

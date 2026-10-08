@@ -77,9 +77,21 @@ class ReconModule(ScannerModule):
         """
         result = ReconResult(target=target)
 
+        # Authenticated assessment: if the caller supplied a session (a Cookie
+        # string copied from a logged-in browser, and/or extra headers like a
+        # bearer token), carry it on every recon request so the crawl sees the
+        # app behind the login, not just the public pages.
+        auth = (ctx.config or {}).get("auth") or {}
+        _headers = {"User-Agent": "h4ckbot-recon/0.1 (+authorized-assessment)"}
+        for _k, _v in (auth.get("headers") or {}).items():
+            _headers[str(_k)] = str(_v)
+        if auth.get("cookie"):
+            _headers["Cookie"] = str(auth["cookie"])
+        if auth.get("cookie") or auth.get("headers"):
+            logger.info("recon %s: running AUTHENTICATED (session supplied)", target)
+
         async with httpx.AsyncClient(
-            timeout=8.0, follow_redirects=True, verify=False,
-            headers={"User-Agent": "h4ckbot-recon/0.1 (+authorized-assessment)"},
+            timeout=8.0, follow_redirects=True, verify=False, headers=_headers,
         ) as client:
             # 1. Which base URLs are reachable?
             for port in DEFAULT_HTTP_PORTS:

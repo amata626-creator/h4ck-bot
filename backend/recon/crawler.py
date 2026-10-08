@@ -52,6 +52,9 @@ _INPUT_NAME_RE = re.compile(r"""<input\b[^>]*?\bname=["']([^"']+)["']""", re.IGN
 _LINK_HREF_RE = re.compile(r"""<a\b[^>]*?\bhref=["']([^"']+)["']""", re.IGNORECASE)
 _SCRIPT_SRC_RE = re.compile(r"""<script\b[^>]*?\bsrc=["']([^"']+)["']""", re.IGNORECASE)
 _LOC_RE = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.IGNORECASE)
+# Never follow a logout/sign-out link during an authenticated crawl - it would
+# invalidate the session and the rest of the crawl would fall back to public.
+_LOGOUT_RE = re.compile(r"(log[\-_]?out|sign[\-_]?out|/auth/logout|/session/(?:end|destroy))", re.IGNORECASE)
 
 # A small, curated set of common paths worth a direct GET on any web target:
 # admin/auth surfaces, API docs, and frequently-exposed config/ops endpoints.
@@ -245,6 +248,8 @@ class Crawler:
             return
         if not _same_origin(self.base_url, url):
             return
+        if _LOGOUT_RE.search(url):
+            return  # don't log ourselves out mid-crawl
         if self.respect_robots and not self._robots_allows(url):
             return
         self._visited.add(url)

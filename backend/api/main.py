@@ -243,6 +243,13 @@ class RunAssessmentRequest(BaseModel):
     full_engine: bool = True
     automation_level: str = "autonomous"
     llm_timeout: float = 60.0
+    # Authenticated assessment: a Cookie string copied from a logged-in
+    # browser session (e.g. "sid=abc; csrf=def"), and/or extra request
+    # headers (e.g. {"Authorization": "Bearer ..."}). When supplied, recon
+    # and the executors carry the session so the scan sees the app behind
+    # the login, not just the public surface.
+    auth_cookie: str = ""
+    auth_headers: dict = {}
 
 
 class RunAssessmentResponse(BaseModel):
@@ -513,6 +520,7 @@ async def _run_assessment_task(
                     assessment_id, req.target, roe,
                     getattr(req, "automation_level", "autonomous"),
                     req.llm_model, getattr(req, "llm_timeout", 300.0),
+                    auth=_auth_from_request(req),
                 )
                 logger.info("assessment %s: red-team engine added %d findings",
                             assessment_id, len(rt_findings))
@@ -725,6 +733,9 @@ class RunRedTeamRequest(BaseModel):
     automation_level: str = "semi_autonomous"
     llm_model: str = "llama3.1"
     llm_timeout: float = 60.0
+    # Authenticated assessment (see RunAssessmentRequest).
+    auth_cookie: str = ""
+    auth_headers: dict = {}
 
 
 def _owner_field_for(semantic, endpoints: list[str]) -> str:
@@ -734,20 +745,36 @@ def _owner_field_for(semantic, endpoints: list[str]) -> str:
     return ""
 
 
-async def _live_fetch(url: str) -> FetchResult:
-    # GET only — the executor never needs more, and this keeps it non-destructive.
-    async with httpx.AsyncClient(verify=False, timeout=10.0, follow_redirects=True) as c:
-        r = await c.get(url)
-        return FetchResult(url=url, status=r.status_code, text=r.text[:200000],
-                           headers={k.lower(): v for k, v in r.headers.items()})
+def _make_live_fetch(auth: dict | None = None):
+    """Build the GET-only fetch the executors use. If an authenticated session
+    was supplied (Cookie string and/or extra headers), carry it on every
+    probe so the executors exercise the app behind the login — the same
+    session recon crawled with."""
+    auth = auth or {}
+    extra: dict[str, str] = {}
+    for _k, _v in (auth.get("headers") or {}).items():
+        extra[str(_k)] = str(_v)
+    if auth.get("cookie"):
+        extra["Cookie"] = str(auth["cookie"])
+
+    async def _live_fetch(url: str) -> FetchResult:
+        # GET only — the executor never needs more, and this keeps it non-destructive.
+        async with httpx.AsyncClient(
+            verify=False, timeout=10.0, follow_redirects=True, headers=extra or None,
+        ) as c:
+            r = await c.get(url)
+            return FetchResult(url=url, status=r.status_code, text=r.text[:200000],
+                               headers={k.lower(): v for k, v in r.headers.items()})
+    return _live_fetch
 
 
-def _make_exec_factory(semantic, roe, base_url: str):
+def _make_exec_factory(semantic, roe, base_url: str, auth: dict | None = None):
     host = roe.authorized_targets[0] if roe.authorized_targets else ""
+    fetch = _make_live_fetch(auth)
 
     def factory(hyp):
         return ExecContext(
-            target_host=host, roe=roe, fetch=_live_fetch,
+            target_host=host, roe=roe, fetch=fetch,
             candidate_ids=["1", "2", "3"],
             owner_field=_owner_field_for(semantic, hyp.target_endpoints),
             base_url=base_url,
@@ -777,7 +804,7 @@ async def redteam_assess(
 
 async def _run_redteam_pipeline(
     assessment_id: str, target: str, roe, automation_level: str,
-    llm_model: str, llm_timeout: float = 60.0,
+    llm_model: str, llm_timeout: float = 60.0, auth: dict | None = None,
 ) -> list[Finding]:
     """Run the full red-team engine (recon -> semantic -> hypotheses -> gated
     plan -> executors -> validation), persist its findings, and record the
@@ -786,10 +813,12 @@ async def _run_redteam_pipeline(
     endpoint AND the dashboard's full-engine scan."""
     asset = Asset(asset_id="a0", name=target, asset_type="host",
                   scope_approved=True, metadata={"exposure": "internet"})
+    auth = auth or {}
 
-    # 1. recon (ReconModule stashes the ReconResult on ctx.config)
+    # 1. recon (ReconModule stashes the ReconResult on ctx.config). The auth
+    # session (if any) rides along on ctx.config so the crawler authenticates.
     ctx = ModuleRunContext(assessment_id=assessment_id, assets=[asset], roe=roe,
-                           automation_level=automation_level, config={})
+                           automation_level=automation_level, config={"auth": auth})
     async for _ in ReconModule().run(ctx):
         pass
     recon = ctx.config.get("recon_results", {}).get("a0")
@@ -811,7 +840,7 @@ async def _run_redteam_pipeline(
     orch = RedTeamOrchestrator(
         _REDTEAM_REGISTRY, default_pipeline(llm_client=OllamaClient(model=llm_model, timeout=25.0)),
     )
-    factory = _make_exec_factory(semantic, roe, base_url)
+    factory = _make_exec_factory(semantic, roe, base_url, auth=auth)
     result = await orch.assess(
         assessment_id=assessment_id, target=target, roe=roe,
         automation_level=automation_level, recon=recon,
@@ -821,7 +850,7 @@ async def _run_redteam_pipeline(
         _STORE.insert_finding(assessment_id, f)
     _REDTEAM[assessment_id] = {
         "plan": result.plan, "semantic": semantic, "roe": roe,
-        "base_url": base_url, "llm_model": llm_model,
+        "base_url": base_url, "llm_model": llm_model, "auth": auth,
         "pending": {s.hypothesis.hypothesis_id: s for s in result.plan.pending},
     }
     logger.info("redteam pipeline %s: %d findings, plan=%s",
@@ -829,12 +858,26 @@ async def _run_redteam_pipeline(
     return result.findings
 
 
+def _auth_from_request(req) -> dict:
+    """Build the auth session dict ({"cookie": str, "headers": dict}) from a
+    scan request. Empty when no session was supplied — recon/executors then
+    run unauthenticated, exactly as before."""
+    cookie = (getattr(req, "auth_cookie", "") or "").strip()
+    headers = getattr(req, "auth_headers", None) or {}
+    out: dict = {}
+    if cookie:
+        out["cookie"] = cookie
+    if headers:
+        out["headers"] = headers
+    return out
+
+
 async def _run_redteam_task(assessment_id: str, req: RunRedTeamRequest) -> None:
     try:
         roe = build_roe(assessment_id, req.target, _SCOPE)
         await _run_redteam_pipeline(
             assessment_id, req.target, roe, req.automation_level,
-            req.llm_model, req.llm_timeout,
+            req.llm_model, req.llm_timeout, auth=_auth_from_request(req),
         )
         _STORE.set_status(assessment_id, "complete")
     except Exception as exc:  # noqa: BLE001
@@ -877,7 +920,7 @@ async def redteam_approve(
         _REDTEAM_REGISTRY,
         default_pipeline(llm_client=OllamaClient(model=rt.get("llm_model", "qwen2.5:3b"), timeout=25.0)),
     )
-    factory = _make_exec_factory(rt["semantic"], rt["roe"], rt["base_url"])
+    factory = _make_exec_factory(rt["semantic"], rt["roe"], rt["base_url"], auth=rt.get("auth"))
     findings = await orch.approve_step(step, factory)
     for f in findings:
         _STORE.insert_finding(assessment_id, f)

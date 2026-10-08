@@ -186,6 +186,13 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
              style="background:var(--bg-3); color:var(--text-1); border:1px solid var(--border);
                     border-radius:6px; padding:6px 10px; font-size:12px; font-family:inherit;
                     width:120px;">
+      <label for="auth-cookie" style="font-size:12px; color:var(--text-2);"
+             title="Optional. Paste a Cookie string from a logged-in browser session to scan the app behind the login (authorized targets only).">Session&nbsp;cookie:</label>
+      <input id="auth-cookie" type="text" placeholder="optional: sid=…; csrf=… (authenticated scan)"
+             autocomplete="off" spellcheck="false"
+             style="background:var(--bg-3); color:var(--text-1); border:1px solid var(--border);
+                    border-radius:6px; padding:6px 10px; font-size:12px; font-family:inherit;
+                    width:220px;">
       <button class="btn" id="view-report" style="font-size:12px; padding:6px 14px;" disabled>
         View report
       </button>
