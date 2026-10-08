@@ -255,13 +255,15 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
         </div>
         <div class="scan-actions">
           <button class="btn" id="view-report" disabled>View report</button>
+          <button class="btn" id="scan-mobile" title="Upload an Android APK (or iOS IPA) for static analysis">&#128241;&nbsp; Scan mobile app</button>
           <button class="btn primary" id="start-scan">&#9654;&nbsp; Start scan</button>
+          <input id="mobile-file" type="file" accept=".apk,.ipa" style="display:none;">
         </div>
       </div>
       <div class="scan-row">
         <div class="scan-field" style="flex:1 1 100%;">
           <label for="auth-cookie">
-            Session cookie <span class="opt">optional — paste a full Cookie header, not a username</span>
+            Session cookie <span class="opt">optional — paste a full Cookie header, not a username (web scans only)</span>
           </label>
           <input id="auth-cookie" type="text"
                  placeholder="e.g. JSESSIONID=9A3F…; csrftoken=… — copied from DevTools → Network → Request Headers → Cookie"
@@ -301,7 +303,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
   <div class="detail" id="detail-panel"></div>
 </div>
-  <script src="app.js?v=7"></script>
+  <script src="app.js?v=8"></script>
 
 <!-- Scope viewer: shows what's in scope.yaml on the server. Read-only. -->
 <div id="scope-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">

@@ -767,6 +767,19 @@ async function boot() {
     btn.addEventListener("click", () => startScanFromForm());
   }
 
+  // Mobile app scan: the button opens a file picker; selecting an
+  // APK/IPA uploads it and runs the mobile static-analysis stage.
+  const mobileBtn = $("#scan-mobile");
+  const mobileFile = $("#mobile-file");
+  if (mobileBtn && mobileFile) {
+    mobileBtn.addEventListener("click", () => mobileFile.click());
+    mobileFile.addEventListener("change", () => {
+      const f = mobileFile.files && mobileFile.files[0];
+      if (f) startMobileScan(f);
+      mobileFile.value = "";  // allow re-selecting the same file
+    });
+  }
+
   // Enter in the target field also starts a scan.
   const targetInput = $("#target-input");
   if (targetInput) {
@@ -800,6 +813,46 @@ async function boot() {
   // Past assessments: load on boot and refresh every 15s.
   loadPastAssessments();
   setInterval(loadPastAssessments, 15000);
+}
+
+async function uploadMobileApp(file) {
+  // Admin-gated like /assessments/run; session users get a bearer injected
+  // by the auth gate, otherwise the token in sessionStorage is used.
+  const token = sessionStorage.getItem("h4ck_admin_token") || "";
+  const headers = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const resp = await fetch(`${API_BASE}/api/mobile/assess`, {
+    method: "POST", headers, body: fd,
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`upload failed: ${resp.status} ${text}`);
+  }
+  const { assessment_id } = await resp.json();
+  return assessment_id;
+}
+
+async function startMobileScan(file) {
+  const name = (file.name || "").toLowerCase();
+  if (!(name.endsWith(".apk") || name.endsWith(".ipa"))) {
+    alert("Please choose an Android .apk or iOS .ipa file.");
+    return;
+  }
+  try {
+    updateRunBadge("running", 0);
+    const rpt = $("#view-report"); if (rpt) rpt.disabled = false;
+    assessmentId = await uploadMobileApp(file);
+    findings = [];
+    selectedFindingId = null;
+    renderStats();
+    renderFindingsTable();
+    startPolling();
+  } catch (e) {
+    updateRunBadge("error", 0);
+    alert(`Mobile scan failed to start.\n\n${e.message || e}`);
+  }
 }
 
 async function startScanFromForm() {

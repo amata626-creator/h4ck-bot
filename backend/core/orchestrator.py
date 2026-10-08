@@ -130,7 +130,14 @@ class Orchestrator:
         web-facing (a bare TCP host, an unreachable target) simply gets
         no screenshot evidence - logged, never faked or skipped silently.
         """
-        asset_names = {f.asset.name for f in run.findings}
+        # Only web-facing assets can be screenshotted. A mobile app (or any
+        # non-web asset) has no URL to navigate to, so skip it rather than
+        # waste two navigation timeouts trying to browse to its filename.
+        _WEB_ASSET_TYPES = {"host", "web_app", "api"}
+        asset_names = {
+            f.asset.name for f in run.findings
+            if f.asset.asset_type in _WEB_ASSET_TYPES
+        }
 
         for asset_name in asset_names:
             result = await capture_screenshot(asset_name)

@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -44,6 +44,7 @@ from modules.example_web_api_module import WebApiScannerModule
 from modules.owasp_top10_module import OwaspTop10Module
 from modules.advanced_checks_module import AdvancedChecksModule
 from modules.advanced_checks2_module import AdvancedChecks2Module
+from modules.mobile_android_module import AndroidStaticModule
 from api.serializers import serialize_finding
 from api.scope_proposals import ProposalStore, verify_token
 from api.rate_limit import RateLimiter
@@ -452,6 +453,87 @@ async def run_assessment(
     )
 
     asyncio.create_task(_run_assessment_task(assessment_id, req, client_ip))
+    return RunAssessmentResponse(assessment_id=assessment_id)
+
+
+# ── Mobile app static analysis (APK upload) ──────────────────────────
+_MOBILE_UPLOAD_DIR = Path(__file__).resolve().parents[2] / "data" / "mobile_uploads"
+_MAX_MOBILE_BYTES = 200 * 1024 * 1024   # 200 MB cap on an uploaded app
+
+
+def _build_mobile_roe(assessment_id: str, name: str):
+    """RoE for an uploaded mobile app. Authorization is the act of an
+    authenticated operator uploading an app they are entitled to test;
+    static analysis is passive (no live target), so active testing is not
+    requested. Window is open now for a short processing period."""
+    now = datetime.now(timezone.utc)
+    return RulesOfEngagement(
+        assessment_id=assessment_id,
+        authorized_by="operator-upload",
+        authorized_targets=[name],
+        testing_window_start=now - timedelta(minutes=1),
+        testing_window_end=now + timedelta(hours=1),
+        permitted_techniques=["static_analysis"],
+        active_testing_permitted=False,
+        destructive_actions_allowed=False,
+    )
+
+
+async def _run_mobile_task(assessment_id: str, file_path: str, display_name: str) -> None:
+    try:
+        asset = Asset(
+            asset_id="a0", name=display_name, asset_type="mobile_app",
+            scope_approved=True, metadata={"file_path": file_path},
+        )
+        roe = _build_mobile_roe(assessment_id, display_name)
+        orchestrator = Orchestrator(
+            validation_pipeline=default_pipeline(
+                llm_client=OllamaClient(model="qwen2.5:3b", timeout=25.0)
+            )
+        )
+        modules = [AndroidStaticModule()]  # iOS module slots in here next
+        count = 0
+        async for finding in orchestrator.run(
+            assessment_id, roe, [asset], modules, automation_level="autonomous"
+        ):
+            _STORE.insert_finding(assessment_id, finding)
+            count += 1
+        logger.info("mobile assessment %s: %d findings on %s", assessment_id, count, display_name)
+        _STORE.set_status(assessment_id, "complete")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("mobile assessment %s failed", assessment_id)
+        _STORE.set_status(assessment_id, f"error: {exc}", error=str(exc))
+
+
+@app.post("/api/mobile/assess", response_model=RunAssessmentResponse)
+async def mobile_assess(
+    request: Request,
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+):
+    """Upload an APK/IPA and run the mobile static-analysis stage on it.
+    Admin-gated (same as a scan); the uploaded binary is the authorization."""
+    _require_admin(authorization)
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "empty upload")
+    if len(raw) > _MAX_MOBILE_BYTES:
+        raise HTTPException(413, f"file exceeds {_MAX_MOBILE_BYTES // (1024*1024)} MB limit")
+
+    assessment_id = str(uuid.uuid4())
+    orig = os.path.basename(file.filename or "app")
+    suffix = ".apk" if orig.lower().endswith(".apk") else (".ipa" if orig.lower().endswith(".ipa") else ".bin")
+    _MOBILE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _MOBILE_UPLOAD_DIR / f"{assessment_id}{suffix}"
+    dest.write_bytes(raw)
+
+    display_name = orig or f"mobile-app{suffix}"
+    _STORE.create_assessment(
+        assessment_id=assessment_id, target=display_name,
+        modules=["mobile_android_static"], llm_model="qwen2.5:3b",
+    )
+    asyncio.create_task(_run_mobile_task(assessment_id, str(dest), display_name))
     return RunAssessmentResponse(assessment_id=assessment_id)
 
 
