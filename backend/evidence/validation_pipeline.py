@@ -99,11 +99,13 @@ def default_pipeline(llm_client=None, prior_findings=None) -> ValidationPipeline
     from evidence.contextual_correlation_layer import ContextualCorrelationLayer as RealContextualCorrelationLayer
     from evidence.fingerprinting_layer import RealApplicationFingerprintingLayer
     from evidence.response_analysis_layer import RealResponseAnalysisLayer
+    from evidence.static_analysis_layer import RealStaticAnalysisLayer
 
     return ValidationPipeline(
         layers=[
             RealApplicationFingerprintingLayer(),
             RealResponseAnalysisLayer(),
+            RealStaticAnalysisLayer(),
             RealContextualCorrelationLayer(prior_findings=prior_findings or []),
             LocalLlmAnalysisLayer(llm_client),
             EvidenceCorrelationLayer(),

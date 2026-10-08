@@ -29,6 +29,15 @@ class RealResponseAnalysisLayer(ValidationLayer):
     name = "response_analysis"
 
     async def evaluate(self, finding: Finding) -> ValidationLayerResult:
+        # Static-analysis findings (mobile APK/IPA manifest facts, etc.) carry
+        # no HTTP response for this layer to analyse — and they may reuse CWE
+        # ids this layer keys HTTP checks on (e.g. CWE-319 cleartext). Abstain
+        # so the static_analysis layer is their gate, not an HTTP check.
+        if any((e.metadata or {}).get("static_claim") for e in finding.evidence):
+            return ValidationLayerResult(
+                layer_name=self.name, passed=True, confidence=0.0,
+                notes="static finding - no HTTP response to analyse", applicable=False,
+            )
         relevant = [
             e for e in finding.evidence
             if e.evidence_type in (EvidenceType.RESPONSE_HEADERS, EvidenceType.HTTP_TRANSACTION, EvidenceType.RAW_OUTPUT)

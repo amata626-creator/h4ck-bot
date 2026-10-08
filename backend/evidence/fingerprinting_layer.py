@@ -52,6 +52,14 @@ class RealApplicationFingerprintingLayer(ValidationLayer):
     name = "fingerprinting"
 
     async def evaluate(self, finding: Finding) -> ValidationLayerResult:
+        # Static-analysis findings aren't HTTP responses — WAF/CDN
+        # fingerprinting is meaningless for a manifest fact. Abstain and let
+        # the static_analysis layer gate them.
+        if any((e.metadata or {}).get("static_claim") for e in finding.evidence):
+            return ValidationLayerResult(
+                layer_name=self.name, passed=True, confidence=0.0,
+                notes="static finding - not an HTTP response to fingerprint", applicable=False,
+            )
         relevant = [
             e for e in finding.evidence
             if e.evidence_type in (EvidenceType.RESPONSE_HEADERS, EvidenceType.HTTP_TRANSACTION, EvidenceType.RAW_OUTPUT)
