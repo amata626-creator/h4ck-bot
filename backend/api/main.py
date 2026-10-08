@@ -242,7 +242,7 @@ class RunAssessmentRequest(BaseModel):
     # exercise the engine instead of just the legacy modules.
     full_engine: bool = True
     automation_level: str = "autonomous"
-    llm_timeout: float = 300.0
+    llm_timeout: float = 60.0
 
 
 class RunAssessmentResponse(BaseModel):
@@ -469,7 +469,7 @@ async def _run_assessment_task(
         modules = [MODULE_REGISTRY[m]() for m in req.modules]
         orchestrator = Orchestrator(
             validation_pipeline=default_pipeline(
-                llm_client=OllamaClient(model=req.llm_model)
+                llm_client=OllamaClient(model=req.llm_model, timeout=25.0)
             )
         )
 
@@ -724,7 +724,7 @@ class RunRedTeamRequest(BaseModel):
     target: str
     automation_level: str = "semi_autonomous"
     llm_model: str = "llama3.1"
-    llm_timeout: float = 300.0
+    llm_timeout: float = 60.0
 
 
 def _owner_field_for(semantic, endpoints: list[str]) -> str:
@@ -777,7 +777,7 @@ async def redteam_assess(
 
 async def _run_redteam_pipeline(
     assessment_id: str, target: str, roe, automation_level: str,
-    llm_model: str, llm_timeout: float = 300.0,
+    llm_model: str, llm_timeout: float = 60.0,
 ) -> list[Finding]:
     """Run the full red-team engine (recon -> semantic -> hypotheses -> gated
     plan -> executors -> validation), persist its findings, and record the
@@ -809,7 +809,7 @@ async def _run_redteam_pipeline(
     # 3. reason + plan + run AUTO steps, validate, store
     base_url = (recon.base_urls or [f"https://{target}"])[0]
     orch = RedTeamOrchestrator(
-        _REDTEAM_REGISTRY, default_pipeline(llm_client=OllamaClient(model=llm_model)),
+        _REDTEAM_REGISTRY, default_pipeline(llm_client=OllamaClient(model=llm_model, timeout=25.0)),
     )
     factory = _make_exec_factory(semantic, roe, base_url)
     result = await orch.assess(
@@ -875,7 +875,7 @@ async def redteam_approve(
         raise HTTPException(404, "no pending step with that hypothesis id")
     orch = RedTeamOrchestrator(
         _REDTEAM_REGISTRY,
-        default_pipeline(llm_client=OllamaClient(model=rt.get("llm_model", "llama3.1"))),
+        default_pipeline(llm_client=OllamaClient(model=rt.get("llm_model", "qwen2.5:3b"), timeout=25.0)),
     )
     factory = _make_exec_factory(rt["semantic"], rt["roe"], rt["base_url"])
     findings = await orch.approve_step(step, factory)
