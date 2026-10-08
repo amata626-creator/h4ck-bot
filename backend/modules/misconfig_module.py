@@ -1,10 +1,17 @@
 """
 Real misconfiguration checker.
 
-Runs three independent checks against HTTP(S) services:
+Runs independent checks against HTTP(S) services:
   1. Missing/weak security headers (HSTS, CSP, X-Frame-Options, etc.)
   2. Weak TLS configuration (protocol version, expired/self-signed cert)
   3. Exposed default/debug pages (common paths that shouldn't be reachable)
+  4. Insecure cookie flags (session/auth cookies missing HttpOnly/Secure/SameSite)
+  5. Permissive CORS (Origin reflection, or wildcard with credentials)
+  6. Technology/version disclosure (Server, X-Powered-By, X-AspNet-Version, …)
+
+All checks are GET-only and non-destructive. Cookie inspection reports on
+flags only and never captures a cookie value. Each produces a single
+authoritative observation, so requires_corroboration is False.
 
 Each check produces a real vulnerability-kind Finding with a real CVSS
 score computed from actual observed conditions (not hardcoded), CWE
@@ -59,6 +66,23 @@ SENSITIVE_PATH_SIGNATURES = {
     "/actuator/health": '"status"',
 }
 
+# Cookies whose theft actually matters (session / auth). A missing flag on
+# one of these is the finding; analytics cookies are not chased.
+SESSION_COOKIE_HINTS = ("sess", "sid", "auth", "token", "jsessionid", "aspxauth", "csrf")
+
+# Response headers that leak stack/framework/version detail. 'server' is
+# handled separately — only flagged when it carries a version number, since a
+# bare 'Server: Apache' is not itself a disclosure worth reporting.
+DISCLOSURE_HEADERS = (
+    "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version", "x-runtime",
+    "x-generator", "x-drupal-dynamic-cache", "x-version", "x-backend-server",
+)
+
+# A sentinel Origin the target could never legitimately trust. If it comes
+# back reflected in Access-Control-Allow-Origin, the CORS policy echoes
+# arbitrary origins — the real misconfiguration.
+CORS_PROBE_ORIGIN = "https://h4ckbot-cors-probe.invalid"
+
 
 class MisconfigModule(ScannerModule):
     @property
@@ -89,6 +113,15 @@ class MisconfigModule(ScannerModule):
                     continue
 
                 async for finding in self._check_headers(asset, ctx, base_url):
+                    yield finding
+
+                async for finding in self._check_cookies(asset, ctx, base_url):
+                    yield finding
+
+                async for finding in self._check_cors(asset, ctx, base_url):
+                    yield finding
+
+                async for finding in self._check_info_disclosure(asset, ctx, base_url):
                     yield finding
 
                 if scheme == "https":
@@ -250,6 +283,230 @@ class MisconfigModule(ScannerModule):
         ))
 
         return finding
+
+    # -- Check 4: insecure cookie flags --------------------------------------
+
+    @staticmethod
+    def _parse_set_cookie(raw: str) -> tuple[str, set[str], str | None]:
+        """Return (name, lowercased-attribute-names, samesite-value). The
+        cookie VALUE is deliberately never returned — we report on flags, not
+        secrets, so a live session token never reaches a finding or report."""
+        parts = [p.strip() for p in raw.split(";")]
+        name = parts[0].split("=", 1)[0].strip() if parts else ""
+        attrs: set[str] = set()
+        samesite: str | None = None
+        for p in parts[1:]:
+            key = p.split("=", 1)[0].strip().lower()
+            attrs.add(key)
+            if key == "samesite":
+                samesite = (p.split("=", 1)[1].strip().lower() if "=" in p else "")
+        return name, attrs, samesite
+
+    async def _check_cookies(self, asset: Asset, ctx: ModuleRunContext, base_url: str) -> AsyncIterator[Finding]:
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=CONNECT_TIMEOUT, follow_redirects=True) as client:
+                resp = await client.get(base_url)
+        except Exception:
+            return
+
+        raw_cookies = resp.headers.get_list("set-cookie") if hasattr(resp.headers, "get_list") else []
+        if not raw_cookies:
+            return
+
+        is_https = base_url.startswith("https")
+        flagged: list[str] = []          # human-readable, value-redacted lines
+        issue_types: set[str] = set()
+        touches_session = False
+
+        for raw in raw_cookies:
+            name, attrs, samesite = self._parse_set_cookie(raw)
+            if not name:
+                continue
+            problems = []
+            if "httponly" not in attrs:
+                problems.append("HttpOnly")
+                issue_types.add("HttpOnly")
+            if is_https and "secure" not in attrs:
+                problems.append("Secure")
+                issue_types.add("Secure")
+            if samesite is None:
+                problems.append("SameSite")
+                issue_types.add("SameSite")
+            if not problems:
+                continue
+            session_like = any(h in name.lower() for h in SESSION_COOKIE_HINTS)
+            touches_session = touches_session or session_like
+            # Reconstruct a redacted Set-Cookie for evidence: name + attributes
+            # only, never the value.
+            present_attrs = ", ".join(sorted(attrs)) or "(none)"
+            flagged.append(
+                f"{name}{' [session]' if session_like else ''}: "
+                f"missing {', '.join(problems)}  (present attrs: {present_attrs})"
+            )
+
+        # Report only when a flag is actually missing — and treat missing
+        # SameSite ALONE as too low-signal to raise on its own (browsers
+        # default to Lax), so require at least one HttpOnly/Secure gap.
+        if not flagged or issue_types <= {"SameSite"}:
+            return
+
+        base = min(3.1 + 1.1 * len(issue_types) + (1.0 if touches_session else 0.0), 6.1)
+        finding = Finding(
+            finding_id=str(uuid.uuid4()),
+            title=f"Insecure cookie flags on {base_url}",
+            description=(
+                f"{len(flagged)} cookie(s) are set without recommended security flags. "
+                + ("A session/auth cookie is affected, so this is directly exploitable "
+                   "via XSS or transport interception. " if touches_session else "")
+                + "Missing flags: " + ", ".join(sorted(issue_types)) + "."
+            ),
+            asset=asset,
+            module_source=self.capabilities.module_id,
+            finding_kind=FindingKind.VULNERABILITY,
+            cvss=CvssScore(
+                base_score=round(base, 1),
+                vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            ),
+            cwe=WeaknessRef(cwe_id="CWE-1004",
+                            name="Sensitive Cookie Without 'HttpOnly' Flag (see also CWE-614 Secure, CWE-1275 SameSite)"),
+            kill_chain_phase=KillChainPhase.RECONNAISSANCE,
+            remediation=(
+                "Set HttpOnly and Secure on session/auth cookies, and an explicit "
+                "SameSite (Lax or Strict). Serve cookies only over HTTPS."
+            ),
+            business_impact="A session cookie reachable from script or sent in clear can be stolen, enabling session hijacking.",
+            requires_corroboration=False,
+        )
+        raw_ev = (f"GET {base_url}\nstatus: {resp.status_code}\n"
+                  "cookies with missing flags (values redacted):\n  "
+                  + "\n  ".join(flagged) + "\n").encode()
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.RESPONSE_HEADERS,
+            raw_bytes=raw_ev,
+            storage_ref=f"evidence/{ctx.assessment_id}/{finding.finding_id}/cookies.txt",
+            description="Set-Cookie flag inspection (cookie values redacted)",
+            metadata={"preview": raw_ev.decode()},
+        ))
+        yield finding
+
+    # -- Check 5: permissive CORS --------------------------------------------
+
+    async def _check_cors(self, asset: Asset, ctx: ModuleRunContext, base_url: str) -> AsyncIterator[Finding]:
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=CONNECT_TIMEOUT, follow_redirects=True) as client:
+                resp = await client.get(base_url, headers={"Origin": CORS_PROBE_ORIGIN})
+        except Exception:
+            return
+
+        headers = {k.lower(): v for k, v in resp.headers.items()}
+        acao = headers.get("access-control-allow-origin")
+        if not acao:
+            return
+        acac = headers.get("access-control-allow-credentials", "").strip().lower() == "true"
+        reflected = acao.strip() == CORS_PROBE_ORIGIN
+        wildcard = acao.strip() == "*"
+
+        # A fixed ACAO naming some specific legitimate origin is NOT a finding.
+        # Only our reflected sentinel, or wildcard-with-credentials, is.
+        if not (reflected or (wildcard and acac)):
+            return
+
+        if reflected and acac:
+            base, detail = 7.5, ("The server reflects an arbitrary Origin AND allows credentials — any site "
+                                 "can read authenticated responses on the victim's behalf.")
+        elif reflected:
+            base, detail = 5.3, ("The server reflects an arbitrary Origin into Access-Control-Allow-Origin, "
+                                 "trusting any site to read cross-origin responses.")
+        else:  # wildcard and acac
+            base, detail = 4.3, ("Access-Control-Allow-Origin is '*' together with Allow-Credentials: true, "
+                                 "an invalid, permissive combination.")
+
+        finding = Finding(
+            finding_id=str(uuid.uuid4()),
+            title=f"Permissive CORS policy on {base_url}",
+            description=detail,
+            asset=asset,
+            module_source=self.capabilities.module_id,
+            finding_kind=FindingKind.VULNERABILITY,
+            cvss=CvssScore(
+                base_score=base,
+                vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N" if (reflected and acac)
+                else "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+            ),
+            cwe=WeaknessRef(cwe_id="CWE-942", name="Permissive Cross-domain Policy with Untrusted Domains"),
+            kill_chain_phase=KillChainPhase.RECONNAISSANCE,
+            remediation=(
+                "Do not reflect the Origin header. Allow only an explicit allowlist of trusted origins, "
+                "and never combine Access-Control-Allow-Credentials: true with a wildcard or reflected origin."
+            ),
+            business_impact="Allows malicious sites to read authenticated responses, exposing user data cross-origin.",
+            requires_corroboration=False,
+        )
+        raw_ev = (f"GET {base_url}\nsent  Origin: {CORS_PROBE_ORIGIN}\n"
+                  f"recv  Access-Control-Allow-Origin: {acao}\n"
+                  f"recv  Access-Control-Allow-Credentials: {headers.get('access-control-allow-credentials', '(absent)')}\n"
+                  f"reflected_sentinel: {reflected}\n").encode()
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.HTTP_TRANSACTION,
+            raw_bytes=raw_ev,
+            storage_ref=f"evidence/{ctx.assessment_id}/{finding.finding_id}/cors.txt",
+            description="CORS reflection probe (sentinel Origin vs returned ACAO/ACAC)",
+            metadata={"preview": raw_ev.decode()},
+        ))
+        yield finding
+
+    # -- Check 6: version / stack information disclosure ----------------------
+
+    async def _check_info_disclosure(self, asset: Asset, ctx: ModuleRunContext, base_url: str) -> AsyncIterator[Finding]:
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=CONNECT_TIMEOUT, follow_redirects=True) as client:
+                resp = await client.get(base_url)
+        except Exception:
+            return
+
+        headers = {k.lower(): v for k, v in resp.headers.items()}
+        leaks: list[str] = []
+        for h in DISCLOSURE_HEADERS:
+            if h in headers and headers[h].strip():
+                leaks.append(f"{h}: {headers[h]}")
+        # 'Server' only counts as a disclosure when it carries a version number.
+        server = headers.get("server", "")
+        if server and any(c.isdigit() for c in server):
+            leaks.append(f"server: {server}")
+
+        if not leaks:
+            return
+
+        finding = Finding(
+            finding_id=str(uuid.uuid4()),
+            title=f"Technology/version disclosure on {base_url}",
+            description=(
+                "Response headers reveal server/framework version detail that helps an attacker "
+                "fingerprint the stack and target known CVEs: " + "; ".join(leaks) + "."
+            ),
+            asset=asset,
+            module_source=self.capabilities.module_id,
+            finding_kind=FindingKind.VULNERABILITY,
+            cvss=CvssScore(
+                base_score=3.1,
+                vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            ),
+            cwe=WeaknessRef(cwe_id="CWE-200", name="Exposure of Sensitive Information (version/stack disclosure)"),
+            kill_chain_phase=KillChainPhase.RECONNAISSANCE,
+            remediation="Suppress or genericize version-bearing headers (Server, X-Powered-By, X-AspNet-Version, etc.).",
+            business_impact="Speeds up targeted attacks by disclosing the exact stack and version to fingerprint.",
+            requires_corroboration=False,
+        )
+        raw_ev = (f"GET {base_url}\nstatus: {resp.status_code}\n"
+                  "disclosure headers:\n  " + "\n  ".join(leaks) + "\n").encode()
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.RESPONSE_HEADERS,
+            raw_bytes=raw_ev,
+            storage_ref=f"evidence/{ctx.assessment_id}/{finding.finding_id}/disclosure.txt",
+            description="Version/stack disclosure headers",
+            metadata={"preview": raw_ev.decode()},
+        ))
+        yield finding
 
     # -- Check 3: exposed default/debug pages --------------------------------
 
