@@ -235,6 +235,18 @@ def build_report_html(data: ReportData) -> str:
   .layers .layer:last-child {{ border-bottom: none; }}
   .layers .name {{ width: 200px; color: var(--muted); }}
   .layers .status {{ color: var(--muted); }}
+  .evidence {{ margin: 12px 0; }}
+  .evidence-head {{ font-weight: 600; font-size: 13px; margin-bottom: 8px; }}
+  .evidence-note {{ font-weight: 400; color: var(--muted); font-size: 11.5px; }}
+  .evidence-item {{ margin-bottom: 10px; }}
+  .evidence-label {{ font-size: 12px; color: var(--muted); margin-bottom: 3px; }}
+  .evidence-hash {{ font-family: 'SF Mono', Consolas, monospace; font-size: 10.5px; color: #999; }}
+  .evidence-pre {{
+    font-family: 'SF Mono', Consolas, monospace; font-size: 11.5px; line-height: 1.45;
+    background: #f6f8fa; border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; margin: 0; white-space: pre-wrap; word-break: break-word;
+    overflow-x: auto; page-break-inside: avoid;
+  }}
   .screenshot {{ margin: 12px 0; }}
   .screenshot img {{ display: block; max-width: 100%; border: 1px solid var(--border); border-radius: 6px; }}
   .screenshot-caption {{ font-size: 11.5px; color: var(--muted); margin-top: 4px; }}
@@ -328,6 +340,67 @@ def _render_screenshots(f: Finding) -> str:
     return "\n".join(parts)
 
 
+_EVIDENCE_LABEL = {
+    EvidenceType.HTTP_TRANSACTION: "HTTP transaction",
+    EvidenceType.BEHAVIORAL_DIFF:  "Behavioral difference (baseline vs probe)",
+    EvidenceType.RESPONSE_HEADERS: "Response headers",
+    EvidenceType.RAW_OUTPUT:       "Raw output",
+    EvidenceType.POC_REFERENCE:    "PoC reference",
+}
+
+
+def _evidence_text(e) -> str:
+    """The human-readable proof for a non-screenshot evidence item. The
+    executors stash it in metadata['preview']; fall back to the stored bytes
+    when a preview isn't present and the content is text (mem:// refs have no
+    file, so a missing preview just yields no body)."""
+    preview = (e.metadata or {}).get("preview")
+    if preview:
+        return str(preview)
+    try:
+        return read_evidence_bytes(e.storage_ref).decode("utf-8", "replace")[:4000]
+    except (FileNotFoundError, OSError, ValueError):
+        return ""
+
+
+def _render_evidence_text(f: Finding) -> str:
+    """Render the reproducible proof — the exact request made, the reflected
+    inert marker, the baseline-vs-probe differential — as monospace blocks.
+    This is what turns a 'Validated' label into something a reader can check
+    and reproduce, so it belongs in the report, not just a count."""
+    def esc(s: Any) -> str:
+        return html.escape(str(s) if s is not None else "")
+
+    items = [e for e in f.evidence if e.evidence_type != EvidenceType.SCREENSHOT]
+    if not items:
+        return ""
+
+    blocks = []
+    for e in items:
+        text = _evidence_text(e)
+        if not text:
+            continue
+        label = _EVIDENCE_LABEL.get(e.evidence_type, e.evidence_type.value)
+        caption = esc(e.description) if e.description else ""
+        short_hash = esc((e.content_hash or "")[:12])
+        blocks.append(
+            f'<div class="evidence-item">'
+            f'<div class="evidence-label">{esc(label)}'
+            f'{f" &mdash; {caption}" if caption else ""}'
+            f'{f" <span class=\"evidence-hash\">sha256:{short_hash}</span>" if short_hash else ""}'
+            f'</div>'
+            f'<pre class="evidence-pre">{esc(text)}</pre>'
+            f'</div>'
+        )
+    if not blocks:
+        return ""
+    return (
+        '<div class="evidence"><div class="evidence-head">Evidence '
+        '<span class="evidence-note">(verbatim, GET-only, inert markers)</span>'
+        '</div>' + "\n".join(blocks) + "</div>"
+    )
+
+
 def _render_finding(f: Finding) -> str:
     def esc(s: Any) -> str:
         return html.escape(str(s) if s is not None else "")
@@ -358,6 +431,7 @@ def _render_finding(f: Finding) -> str:
 
     cvss_cell = str(f.cvss.base_score) if f.cvss.base_score > 0 else "&mdash;"
     screenshots_html = _render_screenshots(f)
+    evidence_html = _render_evidence_text(f)
 
     return f"""
 <div class="finding">
@@ -380,6 +454,7 @@ def _render_finding(f: Finding) -> str:
   {f'<div class="body"><strong>Remediation:</strong> {esc(f.remediation)}</div>' if f.remediation else ''}
   {f'<div class="body"><strong>Business impact:</strong> {esc(f.business_impact)}</div>' if f.business_impact else ''}
 
+  {evidence_html}
   {screenshots_html}
 
   <div class="layers">

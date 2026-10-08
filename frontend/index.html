@@ -261,10 +261,10 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
       <div class="scan-row">
         <div class="scan-field" style="flex:1 1 100%;">
           <label for="auth-cookie">
-            Session cookie <span class="opt">optional — authenticated scan</span>
+            Session cookie <span class="opt">optional — paste a full Cookie header, not a username</span>
           </label>
           <input id="auth-cookie" type="text"
-                 placeholder="paste a Cookie string from a logged-in browser (sid=…; csrf=…) to scan behind the login"
+                 placeholder="e.g. JSESSIONID=9A3F…; csrftoken=… — copied from DevTools → Network → Request Headers → Cookie"
                  autocomplete="off" spellcheck="false">
         </div>
       </div>
