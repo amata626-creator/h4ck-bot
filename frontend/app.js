@@ -301,7 +301,11 @@ function renderStats() {
   for (const f of findings) {
     const sev = (f.severity || f.cvss?.severity || "").toLowerCase();
     if (sev in counts) counts[sev]++;
-    if ((f.status || "").toLowerCase() === "validated") counts.validated++;
+    // An informational finding (e.g. an open port) is shown as "Recorded",
+    // not "Validated", so it must NOT be tallied in the Validated stat — the
+    // tile has to match what the table shows, no inflation.
+    const isInfo = (f.finding_kind || "").toLowerCase() === "informational";
+    if (!isInfo && (f.status || "").toLowerCase() === "validated") counts.validated++;
   }
   const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
   setText("stat-critical", counts.critical);
