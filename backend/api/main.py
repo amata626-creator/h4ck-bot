@@ -1015,14 +1015,20 @@ async def redteam_approve(
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
 
 if _FRONTEND_DIR.is_dir():
+    # Always revalidate the HTML entry pages so a redeploy is picked up on a
+    # normal refresh. The HTML is tiny and references versioned assets
+    # (app.js?v=N), so this is cheap and prevents stale-page confusion.
+    _NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
     @app.get("/login")
     async def login_page():
         lp = _FRONTEND_DIR / "login.html"
-        return FileResponse(lp if lp.is_file() else _FRONTEND_DIR / "index.html")
+        return FileResponse(lp if lp.is_file() else _FRONTEND_DIR / "index.html",
+                            headers=_NO_CACHE)
 
     @app.get("/")
     async def serve_index():
-        return FileResponse(_FRONTEND_DIR / "index.html")
+        return FileResponse(_FRONTEND_DIR / "index.html", headers=_NO_CACHE)
 
     app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
     logger.info("serving frontend from %s", _FRONTEND_DIR)

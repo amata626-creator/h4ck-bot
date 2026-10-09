@@ -88,6 +88,9 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
 .panel { background: var(--bg-1); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
 .scan-launcher { padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow: visible; }
+.launcher-label { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-2); display: flex; align-items: center; gap: 8px; }
+.launcher-badge { font-size: 10px; font-weight: 500; letter-spacing: .02em; text-transform: none; color: var(--text-3); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
+.launcher-divider { height: 1px; background: var(--border); margin: 2px 0; }
 .scan-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
 .scan-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .scan-field label { font-size: 11px; color: var(--text-2); letter-spacing: .02em; }
@@ -243,6 +246,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
     <!-- Scan launcher: moved out of the (overcrowded) top bar so the controls
          have room and the bar stays clean. Same element IDs → app.js unchanged. -->
     <div class="panel scan-launcher">
+      <div class="launcher-label">Web application scan</div>
       <div class="scan-row">
         <div class="scan-field" style="flex:1 1 320px;">
           <label for="target-input">Target</label>
@@ -255,9 +259,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
         </div>
         <div class="scan-actions">
           <button class="btn" id="view-report" disabled>View report</button>
-          <button class="btn" id="scan-mobile" title="Upload an Android APK (or iOS IPA) for static analysis">&#128241;&nbsp; Scan mobile app</button>
           <button class="btn primary" id="start-scan">&#9654;&nbsp; Start scan</button>
-          <input id="mobile-file" type="file" accept=".apk,.ipa" style="display:none;">
         </div>
       </div>
       <div class="scan-row">
@@ -268,6 +270,20 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
           <input id="auth-cookie" type="text"
                  placeholder="e.g. JSESSIONID=9A3F…; csrftoken=… — copied from DevTools → Network → Request Headers → Cookie"
                  autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="launcher-divider"></div>
+
+      <div class="launcher-label">&#128241;&nbsp; Mobile security <span class="launcher-badge">static analysis</span></div>
+      <div class="scan-row">
+        <div class="scan-field" style="flex:1 1 420px;">
+          <label>Upload an app to inspect at rest — manifest flags (debuggable, cleartext, exported components), dangerous permissions, and hardcoded secrets.</label>
+          <div style="color:var(--text-3); font-size:11px;">Android <code class="mono">.apk</code> supported now · iOS <code class="mono">.ipa</code> coming next · non-destructive, nothing is executed</div>
+        </div>
+        <div class="scan-actions">
+          <button class="btn primary" id="scan-mobile" title="Upload an Android APK for static analysis">&#128228;&nbsp; Choose APK&hellip;</button>
+          <input id="mobile-file" type="file" accept=".apk,.ipa" style="display:none;">
         </div>
       </div>
     </div>
