@@ -263,7 +263,7 @@ class AndroidStaticModule(ScannerModule):
             evidence_type=EvidenceType.RAW_OUTPUT, raw_bytes=preview.encode(),
             storage_ref=f"mem://android/{f.finding_id}",
             description=title,
-            metadata={"preview": preview, "static_claim": claim, "source": "android_manifest"},
+            metadata={"preview": preview, "static_claim": claim, "static_artifact": True, "source": "android_manifest"},
         ))
         return f
 
@@ -282,6 +282,6 @@ class AndroidStaticModule(ScannerModule):
             evidence_type=EvidenceType.RAW_OUTPUT, raw_bytes=preview.encode(),
             storage_ref=f"mem://android/{f.finding_id}",
             description=title,
-            metadata={"preview": preview, "static_claim": claim, "source": "android_manifest"},
+            metadata={"preview": preview, "static_claim": claim, "static_artifact": True, "source": "android_manifest"},
         ))
         return f

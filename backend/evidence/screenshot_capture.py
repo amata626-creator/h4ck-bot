@@ -22,8 +22,12 @@ logger = logging.getLogger("h4ck-bot.screenshot")
 NAV_TIMEOUT_MS = 15000
 SCHEMES_TO_TRY = ("https://", "http://")
 
-# The URL a finding is about is recorded in its evidence as "GET <url>".
-_GET_URL_RE = re.compile(r"GET\s+(https?://\S+)")
+# The URL a finding is about is recorded in its evidence as "GET <url>"
+# (web/red-team) or "matched-at: <url>" (Nuclei).
+_URL_RES = (
+    re.compile(r"GET\s+(https?://\S+)"),
+    re.compile(r"matched-at:\s*(https?://\S+)"),
+)
 _MAX_SCREENSHOT_URLS = 25   # bound per assessment
 
 
@@ -111,9 +115,10 @@ def _finding_url(finding) -> Optional[str]:
     evidence records a URL."""
     for e in finding.evidence:
         preview = (e.metadata or {}).get("preview") or e.description or ""
-        m = _GET_URL_RE.search(preview)
-        if m:
-            return m.group(1)
+        for rx in _URL_RES:
+            m = rx.search(preview)
+            if m:
+                return m.group(1)
     name = getattr(finding.asset, "name", "")
     # A bare host is fine (schemes are tried); a non-URL asset (mobile) is not.
     if name and "://" not in name and getattr(finding.asset, "asset_type", "") in ("host", "web_app", "api"):

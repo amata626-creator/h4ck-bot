@@ -29,14 +29,17 @@ class RealResponseAnalysisLayer(ValidationLayer):
     name = "response_analysis"
 
     async def evaluate(self, finding: Finding) -> ValidationLayerResult:
-        # Static-analysis findings (mobile APK/IPA manifest facts, etc.) carry
-        # no HTTP response for this layer to analyse — and they may reuse CWE
-        # ids this layer keys HTTP checks on (e.g. CWE-319 cleartext). Abstain
-        # so the static_analysis layer is their gate, not an HTTP check.
-        if any((e.metadata or {}).get("static_claim") for e in finding.evidence):
+        # Static-artifact findings (mobile APK/IPA manifest facts) carry no
+        # HTTP response for this layer to analyse — and may reuse CWE ids this
+        # layer keys HTTP checks on (e.g. CWE-319). Abstain so the
+        # static_analysis layer is their gate. Keyed off 'static_artifact', not
+        # 'static_claim': a Nuclei finding has static_claim but a real HTTP
+        # response, and it simply won't match any CWE branch here (so it
+        # abstains naturally via checks_run==0).
+        if any((e.metadata or {}).get("static_artifact") for e in finding.evidence):
             return ValidationLayerResult(
                 layer_name=self.name, passed=True, confidence=0.0,
-                notes="static finding - no HTTP response to analyse", applicable=False,
+                notes="static artifact - no HTTP response to analyse", applicable=False,
             )
         relevant = [
             e for e in finding.evidence

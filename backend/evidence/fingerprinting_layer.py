@@ -52,13 +52,16 @@ class RealApplicationFingerprintingLayer(ValidationLayer):
     name = "fingerprinting"
 
     async def evaluate(self, finding: Finding) -> ValidationLayerResult:
-        # Static-analysis findings aren't HTTP responses — WAF/CDN
-        # fingerprinting is meaningless for a manifest fact. Abstain and let
-        # the static_analysis layer gate them.
-        if any((e.metadata or {}).get("static_claim") for e in finding.evidence):
+        # Static-artifact findings (mobile APK/IPA manifest facts) aren't HTTP
+        # responses — WAF/CDN fingerprinting is meaningless for them. Abstain
+        # and let the static_analysis layer gate them. NOTE: this keys off
+        # 'static_artifact', NOT 'static_claim' — an external-engine finding
+        # (Nuclei) carries static_claim but DOES have a real HTTP response, so
+        # it should still be fingerprinted to reject WAF/block pages.
+        if any((e.metadata or {}).get("static_artifact") for e in finding.evidence):
             return ValidationLayerResult(
                 layer_name=self.name, passed=True, confidence=0.0,
-                notes="static finding - not an HTTP response to fingerprint", applicable=False,
+                notes="static artifact - not an HTTP response to fingerprint", applicable=False,
             )
         relevant = [
             e for e in finding.evidence

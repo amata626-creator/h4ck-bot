@@ -134,6 +134,23 @@ else
   warn "then 'ollama pull $OLLAMA_MODEL'. Everything else works without it."
 fi
 
+# ── 9. Nuclei check (optional — template/CVE detection engine) ─────
+say "Checking Nuclei (detection engine, optional)"
+if command -v nuclei >/dev/null 2>&1; then
+  ok "nuclei found: $(nuclei -version 2>&1 | head -1)"
+  if nuclei -update-templates -silent >/dev/null 2>&1; then
+    ok "nuclei templates updated"
+  else
+    warn "could not update nuclei templates (offline?) — existing templates still used"
+  fi
+else
+  warn "nuclei not installed — the 'nuclei' module will no-op (scans still run)."
+  warn "Install it to add CVE/exposure/misconfig coverage, e.g.:"
+  warn "    go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
+  warn "  or download a release binary from https://github.com/projectdiscovery/nuclei/releases"
+  warn "  then: nuclei -update-templates"
+fi
+
 # ── Done ───────────────────────────────────────────────────────────
 cat <<EOF
 
