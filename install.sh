@@ -117,7 +117,7 @@ ok "data/ ready (SQLite db + evidence artifacts live here)"
 # ── 8. Ollama check (optional — local LLM validation layer) ────────
 say "Checking Ollama (local LLM, optional)"
 OLLAMA_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
-OLLAMA_MODEL="${H4CK_BOT_LLM_MODEL:-qwen2.5:3b}"
+OLLAMA_MODEL="${H4CK_BOT_LLM_MODEL:-llama3.1:latest}"
 if curl -fsS "$OLLAMA_URL/api/tags" >/dev/null 2>&1; then
   ok "Ollama is reachable at $OLLAMA_URL"
   if curl -fsS "$OLLAMA_URL/api/tags" | grep -q "\"$OLLAMA_MODEL"; then

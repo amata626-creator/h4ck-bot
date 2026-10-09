@@ -857,7 +857,7 @@ async function startMobileScan(file) {
 
 async function startScanFromForm() {
   const target = ($("#target-input")?.value || "").trim();
-  const llmModel = ($("#llm-model")?.value || "qwen2.5:3b").trim() || "qwen2.5:3b";
+  const llmModel = ($("#llm-model")?.value || "llama3.1:latest").trim() || "llama3.1:latest";
   const authCookie = ($("#auth-cookie")?.value || "").trim();
 
   if (!target) {

@@ -248,14 +248,14 @@ _USERNAME_RE = _re.compile(r"^[A-Za-z0-9._-]{3,32}$")
 class RunAssessmentRequest(BaseModel):
     target: str
     modules: list[str] = ["discovery", "misconfig", "nuclei", "nmap"]
-    llm_model: str = "qwen2.5:3b"
+    llm_model: str = "llama3.1:latest"
     # Run the AI red-team engine (deep recon -> grounded hypotheses ->
     # non-destructive executors -> validation) after the classic modules,
     # under the same assessment. This is what makes "Start scan" actually
     # exercise the engine instead of just the legacy modules.
     full_engine: bool = True
     automation_level: str = "autonomous"
-    llm_timeout: float = 60.0
+    llm_timeout: float = 120.0
     # Authenticated assessment: a Cookie string copied from a logged-in
     # browser session (e.g. "sid=abc; csrf=def"), and/or extra request
     # headers (e.g. {"Authorization": "Bearer ..."}). When supplied, recon
@@ -612,7 +612,7 @@ async def _run_mobile_task(assessment_id: str, file_path: str, display_name: str
         roe = _build_mobile_roe(assessment_id, display_name)
         orchestrator = Orchestrator(
             validation_pipeline=default_pipeline(
-                llm_client=OllamaClient(model="qwen2.5:3b", timeout=25.0)
+                llm_client=OllamaClient(model=req.llm_model, timeout=25.0)
             )
         )
         modules = [AndroidStaticModule()]  # iOS module slots in here next
@@ -655,7 +655,7 @@ async def mobile_assess(
     display_name = orig or f"mobile-app{suffix}"
     _STORE.create_assessment(
         assessment_id=assessment_id, target=display_name,
-        modules=["mobile_android_static"], llm_model="qwen2.5:3b",
+        modules=["mobile_android_static"], llm_model="llama3.1:latest",
     )
     asyncio.create_task(_run_mobile_task(assessment_id, str(dest), display_name))
     return RunAssessmentResponse(assessment_id=assessment_id)
@@ -940,8 +940,8 @@ _REDTEAM_REGISTRY = ExecutorRegistry()
 class RunRedTeamRequest(BaseModel):
     target: str
     automation_level: str = "semi_autonomous"
-    llm_model: str = "llama3.1"
-    llm_timeout: float = 60.0
+    llm_model: str = "llama3.1:latest"
+    llm_timeout: float = 120.0
     # Authenticated assessment (see RunAssessmentRequest).
     auth_cookie: str = ""
     auth_headers: dict = {}
@@ -1013,7 +1013,7 @@ async def redteam_assess(
 
 async def _run_redteam_pipeline(
     assessment_id: str, target: str, roe, automation_level: str,
-    llm_model: str, llm_timeout: float = 60.0, auth: dict | None = None,
+    llm_model: str, llm_timeout: float = 120.0, auth: dict | None = None,
 ) -> list[Finding]:
     """Run the full red-team engine (recon -> semantic -> hypotheses -> gated
     plan -> executors -> validation), persist its findings, and record the
@@ -1134,7 +1134,7 @@ async def redteam_approve(
         raise HTTPException(404, "no pending step with that hypothesis id")
     orch = RedTeamOrchestrator(
         _REDTEAM_REGISTRY,
-        default_pipeline(llm_client=OllamaClient(model=rt.get("llm_model", "qwen2.5:3b"), timeout=25.0)),
+        default_pipeline(llm_client=OllamaClient(model=rt.get("llm_model", "llama3.1:latest"), timeout=25.0)),
     )
     factory = _make_exec_factory(rt["semantic"], rt["roe"], rt["base_url"], auth=rt.get("auth"))
     findings = await orch.approve_step(step, factory)
