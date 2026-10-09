@@ -95,8 +95,8 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 .scan-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .scan-field label { font-size: 11px; color: var(--text-2); letter-spacing: .02em; }
 .scan-field label .opt { color: var(--text-3); font-size: 10.5px; margin-left: 6px; }
-.scan-field input { width: 100%; box-sizing: border-box; background: var(--bg-3); color: var(--text-1); border: 1px solid var(--border); border-radius: 6px; padding: 8px 11px; font-size: 12.5px; font-family: inherit; }
-.scan-field input:focus { outline: none; border-color: var(--border-strong); }
+.scan-field input, .scan-field select { width: 100%; box-sizing: border-box; background: var(--bg-3); color: var(--text-1); border: 1px solid var(--border); border-radius: 6px; padding: 8px 11px; font-size: 12.5px; font-family: inherit; }
+.scan-field input:focus, .scan-field select:focus { outline: none; border-color: var(--border-strong); }
 .scan-actions { display: flex; align-items: flex-end; gap: 8px; margin-left: auto; }
 .scan-actions .btn { font-size: 12.5px; padding: 8px 16px; }
 .panel-head { display: flex; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--border); }
@@ -255,7 +255,9 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
         </div>
         <div class="scan-field" style="flex:0 0 150px;">
           <label for="llm-model">Model</label>
-          <input id="llm-model" type="text" value="llama3.1:latest">
+          <select id="llm-model">
+            <option value="llama3.1:latest">llama3.1:latest</option>
+          </select>
         </div>
         <div class="scan-actions">
           <button class="btn" id="view-report" disabled>View report</button>
@@ -319,7 +321,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
   <div class="detail" id="detail-panel"></div>
 </div>
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=13"></script>
 
 <!-- Scope viewer: shows what's in scope.yaml on the server. Read-only. -->
 <div id="scope-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">

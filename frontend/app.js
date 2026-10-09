@@ -806,6 +806,9 @@ async function boot() {
 
   wireProposalForm();
 
+  // Populate the model dropdown from the installed Ollama models.
+  loadModels();
+
   // Connection health: check every 5s.
   checkConnection();
   setInterval(checkConnection, 5000);
@@ -832,6 +835,28 @@ async function uploadMobileApp(file) {
   }
   const { assessment_id } = await resp.json();
   return assessment_id;
+}
+
+async function loadModels() {
+  const sel = $("#llm-model");
+  if (!sel) return;
+  try {
+    const resp = await fetch(`${API_BASE}/api/models`);
+    if (!resp.ok) return;
+    const { models, default: dflt } = await resp.json();
+    if (!Array.isArray(models) || !models.length) return;
+    const current = sel.value || dflt;
+    sel.innerHTML = "";
+    for (const m of models) {
+      const opt = document.createElement("option");
+      opt.value = m; opt.textContent = m;
+      sel.appendChild(opt);
+    }
+    // keep the user's current pick if still available, else the server default
+    sel.value = models.includes(current) ? current : (models.includes(dflt) ? dflt : models[0]);
+  } catch (_e) {
+    // leave the static default option in place
+  }
 }
 
 async function startMobileScan(file) {

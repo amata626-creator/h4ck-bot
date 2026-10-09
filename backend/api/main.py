@@ -535,6 +535,29 @@ async def remove_authorized_target(
     return {"host": host.strip().lower(), "removed": True}
 
 
+_DEFAULT_LLM_MODEL = "llama3.1:latest"
+
+
+@app.get("/api/models")
+async def list_models():
+    """Local LLMs available via Ollama, for the model dropdown. Graceful: if
+    Ollama is unreachable, returns a small fallback so the UI still works."""
+    base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    models: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{base}/api/tags")
+            r.raise_for_status()
+            data = r.json()
+        models = [m.get("name") for m in data.get("models", []) if m.get("name")]
+    except Exception:  # noqa: BLE001 - Ollama down / not installed
+        models = []
+    if not models:
+        models = [_DEFAULT_LLM_MODEL, "qwen2.5:3b"]
+    default = _DEFAULT_LLM_MODEL if _DEFAULT_LLM_MODEL in models else models[0]
+    return {"models": models, "default": default}
+
+
 @app.post("/api/assessments/run", response_model=RunAssessmentResponse)
 async def run_assessment(
     req: RunAssessmentRequest,
