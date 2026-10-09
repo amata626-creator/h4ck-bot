@@ -5,6 +5,7 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29      # also provides the websockets/httptools extras
 pydantic>=2.6
+python-multipart>=0.0.9      # required for file upload (mobile APK/IPA assess endpoint)
 
 # --- HTTP client (recon, misconfig, semantic, LLM client) ---
 httpx>=0.27
