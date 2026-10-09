@@ -34,7 +34,7 @@ from pydantic import BaseModel
 
 from core.orchestrator import Orchestrator
 from core.rules_of_engagement import RulesOfEngagement
-from core.schema import Asset, Finding
+from core.schema import Asset, Finding, Evidence, EvidenceType, FindingStatus
 from core.scope_loader import Scope, ScopeError, build_roe, load_scope
 from evidence.llm_client import OllamaClient
 from evidence.validation_pipeline import default_pipeline
@@ -684,6 +684,57 @@ async def mobile_assess(
     return RunAssessmentResponse(assessment_id=assessment_id)
 
 
+def _finding_cves(f: Finding) -> set[str]:
+    cves = {c.cve_id.upper() for c in (f.cve_refs or []) if c.cve_id}
+    # Nuclei also records the CVE in evidence metadata.
+    for e in f.evidence:
+        for c in (e.metadata or {}).get("cve", []) or []:
+            if c:
+                cves.add(str(c).upper())
+    return cves
+
+
+async def _confirm_nmap_with_nuclei(findings: list[Finding], pipeline) -> list[Finding]:
+    """Promote version-inferred nmap CVE findings to VALIDATED when Nuclei
+    independently confirmed the same CVE on the same asset. Returns the
+    findings whose status changed (for re-persisting)."""
+    # CVEs that Nuclei actively confirmed, per asset.
+    confirmed: dict[str, dict[str, Finding]] = {}
+    for f in findings:
+        if f.module_source.startswith("nuclei") and f.status == FindingStatus.VALIDATED:
+            for cve in _finding_cves(f):
+                confirmed.setdefault(f.asset.name, {})[cve] = f
+    if not confirmed:
+        return []
+
+    promoted: list[Finding] = []
+    for f in findings:
+        if f.module_source != "nmap_cve":
+            continue
+        asset_confirmed = confirmed.get(f.asset.name, {})
+        for cve in _finding_cves(f):
+            nf = asset_confirmed.get(cve)
+            if not nf:
+                continue
+            # Add the Nuclei confirmation as a second, independent evidence
+            # type (HTTP_TRANSACTION) so corroboration is real, not asserted.
+            note = (f"Independently confirmed by the Nuclei engine: template matched {cve} "
+                    f"on {f.asset.name}. Version inference corroborated by an active check.")
+            f.add_evidence(Evidence.new(
+                evidence_type=EvidenceType.HTTP_TRANSACTION, raw_bytes=note.encode(),
+                storage_ref=f"mem://confirm/{f.finding_id}",
+                description=f"Nuclei confirmation of {cve}",
+                metadata={"preview": note, "source": "nuclei_confirmation", "cve": [cve],
+                          "confirmed_by": nf.finding_id},
+            ))
+            f.title = f.title.replace("(version-inferred)", "(confirmed by Nuclei)")
+            f.validation = await pipeline.validate(f)
+            f.status = f.validation.status
+            promoted.append(f)
+            break
+    return promoted
+
+
 async def _run_assessment_task(
     assessment_id: str,
     req: RunAssessmentRequest,
@@ -740,6 +791,20 @@ async def _run_assessment_task(
             finding.validation = await orchestrator.validation_pipeline.validate(finding)
             finding.status = finding.validation.status
             _STORE.insert_finding(assessment_id, finding)
+
+        # Confirmation loop: where nmap inferred a CVE from a version AND Nuclei
+        # independently confirmed the same CVE on the same target, promote the
+        # version-inferred finding to VALIDATED with the Nuclei match as
+        # corroborating evidence. Two independent engines agreeing turns
+        # inference into proof.
+        promoted = await _confirm_nmap_with_nuclei(
+            findings, orchestrator.validation_pipeline
+        )
+        for finding in promoted:
+            _STORE.insert_finding(assessment_id, finding)
+        if promoted:
+            logger.info("assessment %s: Nuclei confirmed %d version-inferred CVE(s)",
+                        assessment_id, len(promoted))
 
         # Full engine: run the AI red-team loop on the same target/assessment,
         # so one "Start scan" produces recon-grounded, executor-confirmed,
