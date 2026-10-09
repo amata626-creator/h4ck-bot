@@ -209,7 +209,7 @@ function escapeHtml(s) {
 
 const POLL_MS = 1500;
 const DEFAULT_TARGET = "scanme.nmap.org";
-const DEFAULT_MODULES = ["discovery", "misconfig", "nuclei"];  // nuclei runs when installed (no-op otherwise); red-team engine runs on top (full_engine)
+const DEFAULT_MODULES = ["discovery", "misconfig", "nuclei", "nmap"];  // nuclei + nmap run when installed (no-op otherwise); red-team engine runs on top (full_engine)
 
 // ── State ───────────────────────────────────────────────────────────
 let assessmentId = null;

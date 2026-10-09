@@ -151,6 +151,23 @@ else
   warn "  then: nuclei -update-templates"
 fi
 
+# ── 10. nmap + CVE index (optional — service/version → CVE) ────────
+say "Checking nmap (service/version detection, optional)"
+if command -v nmap >/dev/null 2>&1; then
+  ok "nmap found: $(nmap --version 2>/dev/null | head -1)"
+  if [ -s "data/cve/index.json" ]; then
+    ok "local CVE index present (data/cve/index.json)"
+  else
+    warn "CVE index not built yet — nmap will report service inventory but no CVEs."
+    warn "Build it (needs internet; a free NVD API key speeds it up a lot):"
+    warn "    NVD_API_KEY=<key> python backend/tools/sync_nvd.py"
+    warn "  then refresh periodically with:  python backend/tools/sync_nvd.py --days 30"
+  fi
+else
+  warn "nmap not installed — the 'nmap' module will no-op (scans still run)."
+  warn "Install it to enable service/version + CVE correlation:  sudo apt install nmap"
+fi
+
 # ── Done ───────────────────────────────────────────────────────────
 cat <<EOF
 

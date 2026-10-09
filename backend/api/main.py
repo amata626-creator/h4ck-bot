@@ -47,6 +47,7 @@ from modules.advanced_checks_module import AdvancedChecksModule
 from modules.advanced_checks2_module import AdvancedChecks2Module
 from modules.mobile_android_module import AndroidStaticModule
 from modules.nuclei_module import NucleiModule
+from modules.nmap_module import NmapModule
 from api.serializers import serialize_finding
 from api.scope_proposals import ProposalStore, verify_token
 from api.rate_limit import RateLimiter
@@ -237,7 +238,7 @@ _USERNAME_RE = _re.compile(r"^[A-Za-z0-9._-]{3,32}$")
 # ── Request/response models ─────────────────────────────────────────
 class RunAssessmentRequest(BaseModel):
     target: str
-    modules: list[str] = ["discovery", "misconfig", "nuclei"]
+    modules: list[str] = ["discovery", "misconfig", "nuclei", "nmap"]
     llm_model: str = "qwen2.5:3b"
     # Run the AI red-team engine (deep recon -> grounded hypotheses ->
     # non-destructive executors -> validation) after the classic modules,
@@ -263,6 +264,7 @@ MODULE_REGISTRY = {
     "discovery": DiscoveryModule,
     "misconfig": MisconfigModule,
     "nuclei": NucleiModule,
+    "nmap": NmapModule,
     "web_api": WebApiScannerModule,
     "owasp_top10": OwaspTop10Module,
     "advanced_checks": AdvancedChecksModule,
