@@ -135,6 +135,20 @@ class ReconModule(ScannerModule):
             result.js_bundles = crawl.js_bundles
             for ep in crawl.endpoints:
                 result.add_endpoint(ep)
+
+            # Headless render pass: a regex crawl is blind to client-rendered
+            # (SPA) content, so load the primary base in real Chromium and
+            # harvest rendered links/forms AND the XHR/fetch API calls the app
+            # makes. Best-effort; carries the auth session when supplied.
+            try:
+                from recon.headless import render_and_discover
+                rendered = await render_and_discover(primary, extra_headers=_headers)
+                for ep in rendered:
+                    result.add_endpoint(ep)
+                if rendered:
+                    logger.info("recon %s: headless pass added %d endpoint(s)", target, len(rendered))
+            except Exception as exc:  # noqa: BLE001 - headless is best-effort
+                logger.info("recon %s: headless discovery skipped (%s)", target, exc)
             # Cap stored traces: keep the most informative ones
             result.http_traces = _select_traces(crawl.traces, limit=30)
 
