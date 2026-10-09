@@ -14,8 +14,7 @@ from typing import AsyncIterator
 from core.module_interface import ModuleRunContext, OutOfScopeError, ScannerModule
 from core.rules_of_engagement import RulesOfEngagement
 from core.schema import Asset, Evidence, EvidenceType, Finding, FindingKind
-from evidence.evidence_store import save_evidence_bytes
-from evidence.screenshot_capture import capture_screenshot
+from evidence.screenshot_capture import screenshot_findings
 from evidence.validation_pipeline import ValidationPipeline
 
 logger = logging.getLogger("h4ck-bot.orchestrator")
@@ -30,6 +29,7 @@ class AssessmentRun:
     automation_level: str
     findings: list[Finding] = field(default_factory=list)
     audit_log: list[str] = field(default_factory=list)
+    auth: dict = field(default_factory=dict)
 
     def _log(self, msg: str) -> None:
         logger.info(msg)
@@ -47,6 +47,7 @@ class Orchestrator:
         assets: list[Asset],
         modules: list[ScannerModule],
         automation_level: str = "assisted",
+        auth: dict | None = None,
     ) -> AsyncIterator[Finding]:
         # assessment_id is the caller's id (the one already stored in the
         # database) - NOT generated here. Generating our own id here was
@@ -60,6 +61,7 @@ class Orchestrator:
             modules=modules,
             automation_level=automation_level,
         )
+        run.auth = auth or {}
         run._log(f"assessment {run.assessment_id} starting - "
                  f"{len(assets)} assets, {len(modules)} modules, "
                  f"automation={automation_level}")
@@ -124,58 +126,15 @@ class Orchestrator:
 
     async def _capture_and_attach_screenshots(self, run: AssessmentRun) -> None:
         """
-        Capture one real browser screenshot per unique asset that
-        produced findings in this run, and attach it as Evidence to
-        every finding on that asset. Best-effort: an asset that isn't
-        web-facing (a bare TCP host, an unreachable target) simply gets
-        no screenshot evidence - logged, never faked or skipped silently.
+        Capture a screenshot of each finding's OWN url (deduped), carrying the
+        assessment's session when one was supplied, and attach it to the
+        finding(s) at that url. A finding whose url isn't web-facing (a mobile
+        app, a bare non-web asset) gets no screenshot. Best-effort and
+        non-destructive — logged, never faked.
         """
-        # Only web-facing assets can be screenshotted. A mobile app (or any
-        # non-web asset) has no URL to navigate to, so skip it rather than
-        # waste two navigation timeouts trying to browse to its filename.
-        _WEB_ASSET_TYPES = {"host", "web_app", "api"}
-        asset_names = {
-            f.asset.name for f in run.findings
-            if f.asset.asset_type in _WEB_ASSET_TYPES
-        }
-
-        for asset_name in asset_names:
-            result = await capture_screenshot(asset_name)
-            if result is None:
-                run._log(f"screenshot capture skipped for {asset_name} - "
-                         f"not reachable over http(s)")
-                continue
-
-            storage_ref = save_evidence_bytes(
-                assessment_id=run.assessment_id,
-                subject_id=f"asset__{asset_name}",
-                filename="screenshot.png",
-                raw_bytes=result.png_bytes,
-            )
-            evidence = Evidence.new(
-                evidence_type=EvidenceType.SCREENSHOT,
-                raw_bytes=result.png_bytes,
-                storage_ref=storage_ref,
-                description=(
-                    f'Full-page screenshot of {result.url_captured} '
-                    f'(HTTP {result.http_status}, title: "{result.page_title}") '
-                    f'captured at assessment time.'
-                ),
-                metadata={
-                    "url_captured": result.url_captured,
-                    "http_status": result.http_status,
-                    "page_title": result.page_title,
-                },
-            )
-
-            attached = 0
-            for f in run.findings:
-                if f.asset.name == asset_name:
-                    f.evidence.append(evidence)
-                    attached += 1
-
-            run._log(f"screenshot captured for {asset_name} -> {storage_ref} "
-                     f"(attached to {attached} finding(s))")
+        await screenshot_findings(
+            run.findings, run.assessment_id, auth=run.auth, log=run._log
+        )
 
 
 async def _example():

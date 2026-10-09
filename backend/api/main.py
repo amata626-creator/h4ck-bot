@@ -38,6 +38,7 @@ from core.schema import Asset, Finding
 from core.scope_loader import Scope, ScopeError, build_roe, load_scope
 from evidence.llm_client import OllamaClient
 from evidence.validation_pipeline import default_pipeline
+from evidence.screenshot_capture import screenshot_findings
 from modules.discovery_module import DiscoveryModule
 from modules.misconfig_module import MisconfigModule
 from modules.example_web_api_module import WebApiScannerModule
@@ -563,7 +564,10 @@ async def _run_assessment_task(
         )
 
         findings: list[Finding] = []
-        async for finding in orchestrator.run(assessment_id, roe, assets, modules, automation_level="assisted"):
+        async for finding in orchestrator.run(
+            assessment_id, roe, assets, modules,
+            automation_level="assisted", auth=_auth_from_request(req),
+        ):
             _STORE.insert_finding(assessment_id, finding)
             findings.append(finding)
 
@@ -928,6 +932,13 @@ async def _run_redteam_pipeline(
         automation_level=automation_level, recon=recon,
         semantic=semantic, exec_factory=factory,
     )
+    # Screenshot each finding at its OWN url (the reflected-XSS page, the
+    # probed endpoint), carrying the session so authenticated pages render —
+    # then persist, so the screenshot evidence is saved with the finding.
+    try:
+        await screenshot_findings(result.findings, assessment_id, auth=auth)
+    except Exception as exc:  # noqa: BLE001 - evidence capture is best-effort
+        logger.warning("redteam %s: screenshot capture failed: %s", assessment_id, exc)
     for f in result.findings:
         _STORE.insert_finding(assessment_id, f)
     _REDTEAM[assessment_id] = {
