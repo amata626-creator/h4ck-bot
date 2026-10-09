@@ -1,0 +1,56 @@
+# Ground truth for testfire.net (IBM/HCL AltoroMutual deliberately-vulnerable
+# demo bank). Each item is a vulnerability the platform SHOULD surface on the
+# public (unauthenticated) surface. A ground-truth item counts as detected if
+# any finding matches its CWE or any of its match_any keywords (case-insensitive,
+# against the finding's title + description).
+#
+# Honest note: some known Altoro issues are POST-based (e.g. the login SQLi
+# `' or 1=1--`) and are intentionally out of scope for our GET-only,
+# non-destructive executors. Those are marked expected: false so the score
+# reflects what the tool is designed to find, and documents what it is not.
+target: testfire.net
+description: AltoroMutual demo bank — public (unauthenticated) surface
+items:
+  - id: xss-search
+    name: Reflected XSS via query param on /search.jsp
+    category: xss
+    cwe: CWE-79
+    match_any: ["reflected xss", "search.jsp", "xss via"]
+
+  - id: xss-index
+    name: Reflected XSS on /index.jsp (content param)
+    category: xss
+    cwe: CWE-79
+    match_any: ["index.jsp", "reflected xss via 'content'"]
+
+  - id: missing-headers
+    name: Missing security headers (HSTS/CSP/X-Frame-Options)
+    category: misconfig
+    cwe: CWE-693
+    match_any: ["missing security headers"]
+
+  - id: tls
+    name: Weak TLS configuration
+    category: tls
+    cwe: CWE-295
+    match_any: ["tls configuration"]
+
+  - id: cleartext
+    name: Cleartext HTTP exposure
+    category: transport
+    cwe: CWE-319
+    match_any: ["cleartext", "http://testfire"]
+
+  - id: version-disclosure
+    name: Server/framework version disclosure
+    category: info-disclosure
+    cwe: CWE-200
+    match_any: ["version disclosure", "x-powered-by"]
+
+  # Out-of-scope by design (documents the tool's non-destructive boundary):
+  - id: login-sqli
+    name: SQL injection login bypass (POST)
+    category: sqli
+    cwe: CWE-89
+    expected: false
+    note: POST-based login bypass; our executors are GET-only/non-destructive by design.
