@@ -230,6 +230,15 @@ def _caller_is_admin(request: Request) -> bool:
     return False
 
 
+def _caller_username(request: Request, authorization: str | None = None) -> str:
+    """Best-effort identity of the caller for audit: the session username, or
+    'admin-token' when authenticated by the bearer token."""
+    sess = auth.verify_session(request.cookies.get(auth.SESSION_COOKIE))
+    if sess and sess.get("u"):
+        return str(sess["u"])
+    return "admin-token"
+
+
 _VALID_ROLES = {"admin", "operator"}
 import re as _re
 _USERNAME_RE = _re.compile(r"^[A-Za-z0-9._-]{3,32}$")
@@ -395,24 +404,135 @@ async def reset_user_password(username: str, request: Request):
     return {"ok": True}
 
 
+# ── Dynamic scope resolution (file scope ∪ DB-authorized targets) ───
+# This is what makes the platform universal: any target an operator attests
+# they are authorized to test is scannable at runtime, without editing
+# scope.yaml. The authorization gate is preserved — a target is authorized
+# only if it is in the file scope OR has a DB record with an authorization_ref.
+
+def _resolve_scope(target: str) -> dict | None:
+    entry = _SCOPE.find(target)
+    if entry is not None:
+        return {
+            "host": entry.host, "authorized_by": _SCOPE.authorized_by or "scope.yaml",
+            "permitted_techniques": list(entry.permitted_techniques),
+            "active_testing_permitted": entry.active_testing_permitted,
+            "destructive_actions_allowed": entry.destructive_actions_allowed,
+            "source": "scope.yaml",
+        }
+    host = (target or "").strip().lower()
+    db = _STORE.get_authorized_target(host)
+    if db is not None:
+        return {
+            "host": db["host"], "authorized_by": db.get("added_by") or "operator-attested",
+            "permitted_techniques": db["permitted_techniques"],
+            "active_testing_permitted": db["active_testing_permitted"],
+            "destructive_actions_allowed": db["destructive_actions_allowed"],
+            "source": "runtime", "authorization_ref": db.get("authorization_ref", ""),
+        }
+    return None
+
+
+def _is_authorized(target: str) -> bool:
+    return _resolve_scope(target) is not None
+
+
+def _build_roe_for(assessment_id: str, target: str):
+    s = _resolve_scope(target)
+    if s is None:
+        raise ScopeError(
+            f"target '{target}' is not authorized. Add it with an authorization "
+            "reference (POST /api/scope/targets) or in scope.yaml first."
+        )
+    now = datetime.now(timezone.utc)
+    return RulesOfEngagement(
+        assessment_id=assessment_id, authorized_by=s["authorized_by"],
+        authorized_targets=[s["host"]],
+        testing_window_start=now - timedelta(minutes=1),
+        testing_window_end=now + timedelta(hours=4),
+        permitted_techniques=s["permitted_techniques"],
+        active_testing_permitted=s["active_testing_permitted"],
+        destructive_actions_allowed=s["destructive_actions_allowed"],
+    )
+
+
 @app.get("/api/scope")
 async def get_scope():
-    """The list of targets the operator has authorized. The frontend
-    uses this to render a dropdown - it cannot add to the list."""
+    """All authorized targets: the static scope.yaml entries plus any the
+    operator has authorized at runtime (with an authorization reference)."""
+    targets = [
+        {
+            "host": e.host, "note": e.note,
+            "permitted_techniques": list(e.permitted_techniques),
+            "active_testing_permitted": e.active_testing_permitted,
+            "destructive_actions_allowed": e.destructive_actions_allowed,
+            "source": "scope.yaml",
+        }
+        for e in _SCOPE.targets
+    ]
+    for t in _STORE.list_authorized_targets():
+        targets.append({
+            "host": t["host"], "note": t.get("note", ""),
+            "permitted_techniques": t["permitted_techniques"],
+            "active_testing_permitted": t["active_testing_permitted"],
+            "destructive_actions_allowed": t["destructive_actions_allowed"],
+            "source": "runtime", "authorization_ref": t.get("authorization_ref", ""),
+            "added_by": t.get("added_by", ""), "added_at": t.get("added_at", ""),
+        })
     return {
         "authorized_by": _SCOPE.authorized_by,
         "authorization_ref": _SCOPE.authorization_ref,
-        "targets": [
-            {
-                "host": e.host,
-                "note": e.note,
-                "permitted_techniques": list(e.permitted_techniques),
-                "active_testing_permitted": e.active_testing_permitted,
-                "destructive_actions_allowed": e.destructive_actions_allowed,
-            }
-            for e in _SCOPE.targets
-        ],
+        "targets": targets,
     }
+
+
+class AddTargetRequest(BaseModel):
+    host: str
+    authorization_ref: str
+    note: str = ""
+    active_testing_permitted: bool = True
+
+
+@app.post("/api/scope/targets", status_code=201)
+async def add_authorized_target(
+    req: AddTargetRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Authorize ANY target at runtime (universal scope). Requires an
+    authorization reference — this is still authorized-testing-only, just not
+    confined to scope.yaml. Admin/session gated and audited."""
+    _require_admin(authorization)
+    host = (req.host or "").strip().lower()
+    # strip any scheme/path the user pasted
+    host = host.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    if not host or " " in host:
+        raise HTTPException(400, "invalid host")
+    if not (req.authorization_ref or "").strip():
+        raise HTTPException(400, "authorization_ref is required — you must attest authorization to test this target")
+    caller = _caller_username(request, authorization)
+    _STORE.add_authorized_target(
+        host=host, authorization_ref=req.authorization_ref.strip(), note=req.note.strip(),
+        active_testing_permitted=bool(req.active_testing_permitted), added_by=caller,
+    )
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info("scope: %s authorized target '%s' (ref=%r, ip=%s)",
+                caller, host, req.authorization_ref.strip()[:80], client_ip)
+    return {"host": host, "authorized": True, "source": "runtime"}
+
+
+@app.delete("/api/scope/targets/{host}")
+async def remove_authorized_target(
+    host: str, request: Request, authorization: str | None = Header(default=None),
+):
+    """Remove a runtime-authorized target. scope.yaml entries are not
+    affected (edit the file for those)."""
+    _require_admin(authorization)
+    removed = _STORE.remove_authorized_target(host)
+    if not removed:
+        raise HTTPException(404, "no runtime-authorized target with that host")
+    logger.info("scope: removed runtime target '%s'", host.strip().lower())
+    return {"host": host.strip().lower(), "removed": True}
 
 
 @app.post("/api/assessments/run", response_model=RunAssessmentResponse)
@@ -431,12 +551,11 @@ async def run_assessment(
     if unknown:
         raise HTTPException(400, f"unknown module(s): {unknown}")
 
-    if not _SCOPE.is_authorized(req.target):
+    if not _is_authorized(req.target):
         raise HTTPException(
             403,
-            f"target '{req.target}' is not in the authorized scope. "
-            f"Authorized targets: {[e.host for e in _SCOPE.targets]}. "
-            "Edit scope.yaml on the server to add one.",
+            f"target '{req.target}' is not authorized yet. Authorize it with an "
+            "authorization reference (POST /api/scope/targets) and scan again.",
         )
 
     # Per-client rate limiting: 2 concurrent scans, 10 per 60s.
@@ -548,7 +667,7 @@ async def _run_assessment_task(
     client_ip: str = "unknown",
 ):
     try:
-        roe = build_roe(assessment_id, req.target, _SCOPE)
+        roe = _build_roe_for(assessment_id, req.target)
 
         # Exactly one Asset per target. Modules declare the asset types
         # they accept; a single physical target is a single asset.
@@ -879,7 +998,7 @@ async def redteam_assess(
     authorization: str | None = Header(default=None),
 ):
     _require_admin(authorization)
-    if not _SCOPE.is_authorized(req.target):
+    if not _is_authorized(req.target):
         raise HTTPException(
             403,
             f"target '{req.target}' is not in the authorized scope. "
@@ -971,7 +1090,7 @@ def _auth_from_request(req) -> dict:
 
 async def _run_redteam_task(assessment_id: str, req: RunRedTeamRequest) -> None:
     try:
-        roe = build_roe(assessment_id, req.target, _SCOPE)
+        roe = _build_roe_for(assessment_id, req.target)
         await _run_redteam_pipeline(
             assessment_id, req.target, roe, req.automation_level,
             req.llm_model, req.llm_timeout, auth=_auth_from_request(req),

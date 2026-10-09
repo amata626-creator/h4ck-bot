@@ -70,6 +70,21 @@ CREATE TABLE IF NOT EXISTS users (
     active        INTEGER NOT NULL DEFAULT 1,
     created_at    TEXT NOT NULL
 );
+
+-- Dynamic, operator-authorized scope. Lets the platform target ANY host the
+-- operator attests they are authorized to test, at runtime, without editing
+-- scope.yaml or restarting. The authorization_ref is REQUIRED and audited —
+-- this is still authorized-testing-only, just not confined to a static file.
+CREATE TABLE IF NOT EXISTS authorized_targets (
+    host                       TEXT PRIMARY KEY,
+    authorization_ref          TEXT NOT NULL,
+    note                       TEXT NOT NULL DEFAULT '',
+    permitted_techniques       TEXT NOT NULL DEFAULT '[]',  -- JSON list
+    active_testing_permitted   INTEGER NOT NULL DEFAULT 1,
+    destructive_actions_allowed INTEGER NOT NULL DEFAULT 0,
+    added_by                   TEXT NOT NULL DEFAULT '',
+    added_at                   TEXT NOT NULL
+);
 """
 
 
@@ -195,6 +210,65 @@ class Store:
             return con.execute(
                 "SELECT COUNT(*) AS c FROM users WHERE role='admin' AND active=1"
             ).fetchone()["c"]
+
+    # ── dynamic authorized scope ─────────────────────────────────
+
+    def add_authorized_target(
+        self, host: str, authorization_ref: str, note: str = "",
+        permitted_techniques: list[str] | None = None,
+        active_testing_permitted: bool = True,
+        destructive_actions_allowed: bool = False,
+        added_by: str = "",
+    ) -> None:
+        """Add (or update) a runtime-authorized target. authorization_ref is
+        required by the caller — this method persists the attestation."""
+        techs = json.dumps(permitted_techniques or
+                           ["passive_recon", "port_scan", "misconfig_check", "active_testing"])
+        with self._lock, self._connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO authorized_targets "
+                "(host, authorization_ref, note, permitted_techniques, "
+                " active_testing_permitted, destructive_actions_allowed, added_by, added_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (host.strip().lower(), authorization_ref, note, techs,
+                 1 if active_testing_permitted else 0,
+                 1 if destructive_actions_allowed else 0,
+                 added_by, datetime.now(timezone.utc).isoformat()),
+            )
+
+    def get_authorized_target(self, host: str) -> dict | None:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT * FROM authorized_targets WHERE host=?", (host.strip().lower(),)
+            ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["permitted_techniques"] = json.loads(d["permitted_techniques"] or "[]")
+        d["active_testing_permitted"] = bool(d["active_testing_permitted"])
+        d["destructive_actions_allowed"] = bool(d["destructive_actions_allowed"])
+        return d
+
+    def list_authorized_targets(self) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT * FROM authorized_targets ORDER BY added_at DESC"
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["permitted_techniques"] = json.loads(d["permitted_techniques"] or "[]")
+            d["active_testing_permitted"] = bool(d["active_testing_permitted"])
+            d["destructive_actions_allowed"] = bool(d["destructive_actions_allowed"])
+            out.append(d)
+        return out
+
+    def remove_authorized_target(self, host: str) -> bool:
+        with self._lock, self._connect() as con:
+            cur = con.execute(
+                "DELETE FROM authorized_targets WHERE host=?", (host.strip().lower(),)
+            )
+        return cur.rowcount > 0
 
     # ── findings ─────────────────────────────────────────────────
 

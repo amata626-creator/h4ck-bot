@@ -889,17 +889,58 @@ async function startScanFromForm() {
       return;
     }
     if (msg.includes("403")) {
-      alert(
-        `Target not authorized: ${target}\n\n` +
-        `The server only scans targets listed in scope.yaml. ` +
-        `Authorized targets: ${(window.__scope_targets || []).join(", ") || "(none loaded)"}.\n\n` +
-        `To add one: edit scope.yaml on the server, then restart the API.`
+      // Universal targets: authorize this target at runtime with an
+      // authorization attestation, then scan it. Still authorized-only —
+      // the operator must attest they are allowed to test this target.
+      updateRunBadge("idle", 0);
+      const ref = window.prompt(
+        `"${target}" isn't authorized yet.\n\n` +
+        `This tool runs authorized tests only. Enter your authorization reference ` +
+        `to attest you are permitted to test this target ` +
+        `(e.g. an engagement ID, a bug-bounty program URL, or "my own infrastructure"):`,
+        ""
       );
+      if (!ref || !ref.trim()) {
+        updateRunBadge("error", 0);
+        return;
+      }
+      try {
+        await authorizeTarget(target, ref.trim());
+        // authorized — start the scan now
+        updateRunBadge("running", 0);
+        assessmentId = await startAssessment(target, DEFAULT_MODULES, llmModel, authCookie);
+        findings = []; selectedFindingId = null;
+        renderStats(); renderFindingsTable(); startPolling();
+        getScope().then((s) => { scope = s; renderScopeSummary(s); }).catch(() => {});  // refresh authorized list
+        return;
+      } catch (e2) {
+        const m2 = e2.message || String(e2);
+        if (m2.includes("401") || m2.toLowerCase().includes("admin token")) {
+          alert(`Admin token required to authorize a new target.\n\n` +
+                `Open "Authorized scope", paste the H4CK_BOT_ADMIN_TOKEN, then try again.`);
+        } else {
+          alert(`Could not authorize target: ${m2}`);
+        }
+        updateRunBadge("error", 0);
+        return;
+      }
     } else {
       alert(`Failed to start scan: ${msg}`);
     }
     updateRunBadge("error", 0);
   }
+}
+
+async function authorizeTarget(host, authorizationRef) {
+  const token = sessionStorage.getItem("h4ck_admin_token") || "";
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const resp = await fetch(`${API_BASE}/api/scope/targets`, {
+    method: "POST", headers,
+    body: JSON.stringify({ host, authorization_ref: authorizationRef, active_testing_permitted: true }),
+  });
+  if (!resp.ok) throw new Error(`authorize failed: ${resp.status} ${await resp.text()}`);
+  return resp.json();
 }
 
 function renderScopeSummary(scope) {
