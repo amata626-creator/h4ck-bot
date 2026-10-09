@@ -146,7 +146,7 @@ th{{background:#f6f8fa}}.big{{font-size:28px;font-weight:700}}</style>
 
 # ── running a scan via the live API ─────────────────────────────────
 
-def run_via_api(api: str, token: str, target: str, timeout_s: int = 900) -> list[dict]:
+def run_via_api(api: str, token: str, target: str, timeout_s: int = 1800) -> list[dict]:
     import httpx  # local import so scoring works without httpx installed
     headers = {"Content-Type": "application/json"}
     if token:
@@ -156,7 +156,7 @@ def run_via_api(api: str, token: str, target: str, timeout_s: int = 900) -> list
         r = c.post(f"{api}/api/assessments/run", headers=headers, json={"target": target})
         r.raise_for_status()
         aid = r.json()["assessment_id"]
-        print(f"assessment {aid} started; polling...", file=sys.stderr)
+        print(f"assessment {aid} started; polling (up to {timeout_s}s)...", file=sys.stderr)
         deadline = time.time() + timeout_s
         status = "running"
         while time.time() < deadline:
@@ -168,7 +168,13 @@ def run_via_api(api: str, token: str, target: str, timeout_s: int = 900) -> list
             status = meta.get("status", "running")
             if status != "running":
                 break
-        print(f"assessment finished: {status}", file=sys.stderr)
+        if status == "running":
+            print(f"WARNING: poll timed out after {timeout_s}s — the scan is still "
+                  f"running; scoring the findings stored so far (this may UNDERCOUNT). "
+                  f"Re-run with --timeout to wait longer, or pick a faster model.",
+                  file=sys.stderr)
+        else:
+            print(f"assessment finished: {status}", file=sys.stderr)
         fr = c.get(f"{api}/api/assessments/{aid}/report.json", headers=headers)
         if fr.status_code == 200:
             return fr.json().get("findings", [])
@@ -186,6 +192,8 @@ def main():
     ap.add_argument("--findings", help="score a saved findings JSON instead of running a scan")
     ap.add_argument("--html", help="also write an HTML scorecard to this path")
     ap.add_argument("--json", help="also write the scorecard as JSON to this path")
+    ap.add_argument("--timeout", type=int, default=1800,
+                    help="seconds to wait for the scan to finish (default 1800)")
     args = ap.parse_args()
 
     with open(args.ground_truth) as f:
@@ -197,7 +205,7 @@ def main():
             if isinstance(findings, dict):
                 findings = findings.get("findings", [])
     elif args.api:
-        findings = run_via_api(args.api, args.token, gt["target"])
+        findings = run_via_api(args.api, args.token, gt["target"], timeout_s=args.timeout)
     else:
         ap.error("provide --api to run a scan, or --findings to score saved output")
 
