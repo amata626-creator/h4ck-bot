@@ -986,6 +986,16 @@ async def _run_assessment_task(
                 logger.exception("assessment %s: red-team engine failed (classic "
                                  "findings kept): %s", assessment_id, exc)
 
+        # AI attack-path chaining: reason over everything confirmed and compose
+        # the findings into exploit chains (the pentester's narrative). Grounded
+        # to real finding_ids, best-effort, and isolated so a failure never
+        # affects the findings already stored.
+        try:
+            await _compose_attack_paths(assessment_id, req.llm_model,
+                                        getattr(req, "llm_timeout", 120.0))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("assessment %s: attack-path chaining skipped: %s", assessment_id, exc)
+
         _STORE.set_status(assessment_id, "complete")
     except Exception as exc:
         logger.exception("assessment %s failed", assessment_id)
@@ -1160,7 +1170,8 @@ async def get_report_json(assessment_id: str):
     if meta is None:
         raise HTTPException(404, "assessment not found")
     findings = _STORE.list_findings(assessment_id)
-    data = build_report_data(meta, findings, scope_note=_SCOPE.authorization_ref)
+    data = build_report_data(meta, findings, scope_note=_SCOPE.authorization_ref,
+                             attack_paths=_STORE.list_attack_paths(assessment_id))
     return build_report_json(data)
 
 
@@ -1171,7 +1182,8 @@ async def get_report_html(assessment_id: str):
     if meta is None:
         raise HTTPException(404, "assessment not found")
     findings = _STORE.list_findings(assessment_id)
-    data = build_report_data(meta, findings, scope_note=_SCOPE.authorization_ref)
+    data = build_report_data(meta, findings, scope_note=_SCOPE.authorization_ref,
+                             attack_paths=_STORE.list_attack_paths(assessment_id))
     return HTMLResponse(build_report_html(data))
 
 # ── Red-team assessment (hypothesis-driven loop) ────────────────────
@@ -1301,6 +1313,31 @@ async def redteam_assess(
                              modules=["redteam"], llm_model=req.llm_model)
     asyncio.create_task(_run_redteam_task(assessment_id, req))
     return RunAssessmentResponse(assessment_id=assessment_id)
+
+
+async def _compose_attack_paths(assessment_id: str, llm_model: str, llm_timeout: float) -> None:
+    """Chain the assessment's confirmed findings into AI-composed attack paths,
+    persist them, and tag member findings (so the UI 'Has attack path' filter
+    lights up). Grounded + best-effort; no-op when nothing chains."""
+    from redteam.attack_paths import AttackPathChainer, attack_path_to_dict
+    findings = _STORE.list_findings(assessment_id)
+    chainer = AttackPathChainer(model=llm_model, timeout=min(llm_timeout, 60.0))
+    paths = await chainer(findings)
+    if not paths:
+        return
+    by_id = {f.finding_id: f for f in findings}
+    tagged: set[str] = set()
+    for ap in paths:
+        _STORE.insert_attack_path(assessment_id, attack_path_to_dict(ap))
+        for fid in ap.finding_ids:
+            f = by_id.get(fid)
+            if f is not None and not f.attack_path_id:   # first chain to claim it wins
+                f.attack_path_id = ap.attack_path_id
+                tagged.add(fid)
+    for fid in tagged:
+        _STORE.insert_finding(assessment_id, by_id[fid])
+    logger.info("assessment %s: composed %d attack path(s), tagged %d finding(s)",
+                assessment_id, len(paths), len(tagged))
 
 
 async def _run_redteam_pipeline(

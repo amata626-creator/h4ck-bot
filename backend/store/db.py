@@ -85,6 +85,19 @@ CREATE TABLE IF NOT EXISTS authorized_targets (
     added_by                   TEXT NOT NULL DEFAULT '',
     added_at                   TEXT NOT NULL
 );
+
+-- AI-composed attack paths: chains of confirmed findings the strategist reasons
+-- into a higher-impact exploit path. Each references real finding_ids (grounded
+-- at creation), so a chain can never cite a finding that does not exist.
+CREATE TABLE IF NOT EXISTS attack_paths (
+    attack_path_id TEXT PRIMARY KEY,
+    assessment_id  TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    document       TEXT NOT NULL,   -- full AttackPath as JSON
+    FOREIGN KEY (assessment_id) REFERENCES assessments(assessment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_paths_assessment
+    ON attack_paths(assessment_id, created_at);
 """
 
 
@@ -300,6 +313,26 @@ class Store:
                 (assessment_id,),
             ).fetchall()
         return [_finding_from_json(json.loads(r["document"])) for r in rows]
+
+    def insert_attack_path(self, assessment_id: str, path: dict) -> None:
+        """Persist one AI-composed attack path (a plain dict). Keyed by its id,
+        so re-running an assessment's chaining replaces its paths."""
+        from datetime import datetime, timezone
+        with self._lock, self._connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO attack_paths "
+                "(attack_path_id, assessment_id, created_at, document) VALUES (?, ?, ?, ?)",
+                (path.get("attack_path_id", ""), assessment_id,
+                 datetime.now(timezone.utc).isoformat(), json.dumps(path)),
+            )
+
+    def list_attack_paths(self, assessment_id: str) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT document FROM attack_paths WHERE assessment_id=? ORDER BY created_at ASC",
+                (assessment_id,),
+            ).fetchall()
+        return [json.loads(r["document"]) for r in rows]
 
     def get_finding(self, assessment_id: str, finding_id: str) -> Finding | None:
         with self._connect() as con:

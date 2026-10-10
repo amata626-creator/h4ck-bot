@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import base64
 import html
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -62,6 +62,7 @@ class ReportData:
     generated_at: str
     findings: list[Finding]
     scope_note: str = ""
+    attack_paths: list[dict] = field(default_factory=list)
     methodology_note: str = (
         "Findings were produced by automated scanner modules and passed "
         "through a multi-layer validation pipeline. Informational findings "
@@ -79,6 +80,7 @@ def build_report_data(
     assessment_meta: dict,
     findings: list[Finding],
     scope_note: str = "",
+    attack_paths: list[dict] | None = None,
 ) -> ReportData:
     return ReportData(
         assessment_id=assessment_meta.get("assessment_id", ""),
@@ -90,6 +92,7 @@ def build_report_data(
         generated_at=datetime.now(timezone.utc).isoformat(),
         findings=findings,
         scope_note=scope_note,
+        attack_paths=attack_paths or [],
     )
 
 
@@ -113,6 +116,7 @@ def build_report_json(data: ReportData) -> dict[str, Any]:
         "completed_at": data.completed_at,
         "generated_at": data.generated_at,
         "scope_note": data.scope_note,
+        "attack_paths": data.attack_paths,
         "methodology_note": data.methodology_note,
         "summary": {
             "total": len(data.findings),
@@ -285,6 +289,8 @@ def build_report_html(data: ReportData) -> str:
     <span><strong>Validated:</strong> {validated}</span>
   </div>
 
+  {_render_attack_paths(data)}
+
   <h2>Methodology</h2>
   <div class="note">{esc(data.methodology_note)}</div>
   {f'<div class="note"><strong>Scope:</strong> {esc(data.scope_note)}</div>' if data.scope_note else ''}
@@ -301,6 +307,38 @@ def build_report_html(data: ReportData) -> str:
 </body>
 </html>
 """
+
+
+def _render_attack_paths(data: "ReportData") -> str:
+    """Render the AI-composed attack paths (the pentester narrative). Each chain
+    lists its member findings by title, so the reader sees the story, grounded in
+    findings that appear in the Findings section below."""
+    if not data.attack_paths:
+        return ""
+    title_by_id = {f.finding_id: f.title for f in data.findings}
+    blocks = []
+    for ap in data.attack_paths:
+        sev = str(ap.get("overall_severity", "info")).lower()
+        steps = "".join(
+            f"<li>{html.escape(title_by_id.get(fid, fid))}</li>"
+            for fid in ap.get("finding_ids", [])
+        )
+        phases = ", ".join(ap.get("kill_chain_phases", []))
+        blocks.append(
+            f'<div class="apath">'
+            f'<div class="finding-head"><span class="finding-title">{html.escape(ap.get("title",""))}</span>'
+            f'<span class="pill {html.escape(sev)}">{html.escape(sev.upper())}</span></div>'
+            f'<div class="body">{html.escape(ap.get("narrative",""))}</div>'
+            f'<div class="apath-steps"><strong>Chained findings:</strong><ol>{steps}</ol></div>'
+            + (f'<div class="kv"><span class="k">kill chain</span><span class="v">{html.escape(phases)}</span></div>' if phases else "")
+            + '</div>'
+        )
+    return ('<h2>Attack paths <span style="font-weight:400;font-size:12px;color:var(--muted)">'
+            '&middot; AI-composed, grounded in the findings below</span></h2>'
+            '<style>.apath{border:1px solid var(--border);border-left:4px solid var(--crit);'
+            'border-radius:8px;padding:14px 16px;margin-bottom:12px;page-break-inside:avoid}'
+            '.apath-steps{font-size:13px;margin-top:8px}.apath-steps ol{margin:4px 0 0 18px}</style>'
+            + "\n".join(blocks))
 
 
 def _sort_findings(findings: list[Finding]) -> list[Finding]:
