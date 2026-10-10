@@ -796,6 +796,22 @@ async function boot() {
     $("#cred-run")?.addEventListener("click", startCredentialedScan);
   }
 
+  // Cloud (AWS) scan modal.
+  const cloudBtn = $("#scan-cloud");
+  const cloudModal = $("#cloud-modal");
+  const closeCloud = () => { if (cloudModal) cloudModal.style.display = "none"; };
+  if (cloudBtn && cloudModal) {
+    cloudBtn.addEventListener("click", () => {
+      const m = $("#cloud-msg"); if (m) m.textContent = "";
+      cloudModal.style.display = "flex";
+      $("#cloud-ak")?.focus();
+    });
+    $("#cloud-close")?.addEventListener("click", closeCloud);
+    $("#cloud-cancel")?.addEventListener("click", closeCloud);
+    cloudModal.addEventListener("click", (e) => { if (e.target === cloudModal) closeCloud(); });
+    $("#cloud-run")?.addEventListener("click", startCloudScan);
+  }
+
   // Enter in the target field also starts a scan.
   const targetInput = $("#target-input");
   if (targetInput) {
@@ -872,6 +888,48 @@ async function loadModels() {
     sel.value = models.includes(current) ? current : (models.includes(dflt) ? dflt : models[0]);
   } catch (_e) {
     // leave the static default option in place
+  }
+}
+
+async function startCloudScan() {
+  const access_key = ($("#cloud-ak")?.value || "").trim();
+  const secret_key = $("#cloud-sk")?.value || "";
+  const session_token = $("#cloud-st")?.value || "";
+  const region = ($("#cloud-region")?.value || "us-east-1").trim() || "us-east-1";
+  const authRef = ($("#cloud-ref")?.value || "").trim();
+  const msg = $("#cloud-msg");
+  const setMsg = (t, ok) => { if (msg) { msg.textContent = t; msg.style.color = ok ? "var(--validated)" : "#f4a3a6"; } };
+
+  if (!access_key || !secret_key) return setMsg("Enter the AWS access key and secret.", false);
+  if (!authRef) return setMsg("Authorization reference is required.", false);
+
+  const token = sessionStorage.getItem("h4ck_admin_token") || "";
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  setMsg("Authenticating to AWS and auditing…", true);
+  try {
+    const resp = await fetch(`${API_BASE}/api/cloud/assess`, {
+      method: "POST", headers,
+      body: JSON.stringify({ access_key, secret_key, session_token, region, authorization_ref: authRef }),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+    const { assessment_id } = await resp.json();
+    // clear sensitive fields immediately
+    if ($("#cloud-sk")) $("#cloud-sk").value = "";
+    if ($("#cloud-st")) $("#cloud-st").value = "";
+    const m = $("#cloud-modal"); if (m) m.style.display = "none";
+    assessmentId = assessment_id;
+    findings = []; selectedFindingId = null;
+    updateRunBadge("running", 0);
+    const rpt = $("#view-report"); if (rpt) rpt.disabled = false;
+    renderStats(); renderFindingsTable(); startPolling();
+  } catch (e) {
+    const m2 = e.message || String(e);
+    if (m2.includes("401") || m2.toLowerCase().includes("admin token")) {
+      setMsg("Admin token required — open Authorized scope and paste it.", false);
+    } else {
+      setMsg(`Failed: ${m2}`, false);
+    }
   }
 }
 

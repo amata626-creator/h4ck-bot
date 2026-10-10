@@ -49,6 +49,7 @@ from modules.mobile_android_module import AndroidStaticModule
 from modules.nuclei_module import NucleiModule
 from modules.nmap_module import NmapModule
 from modules.credentialed_module import run_audit, audit_to_findings
+from modules.cloud_aws_module import collect as aws_collect, cloud_findings
 from api.serializers import serialize_finding
 from api.scope_proposals import ProposalStore, verify_token
 from api.rate_limit import RateLimiter
@@ -653,6 +654,60 @@ async def _run_mobile_task(assessment_id: str, file_path: str, display_name: str
     except Exception as exc:  # noqa: BLE001
         logger.exception("mobile assessment %s failed", assessment_id)
         _STORE.set_status(assessment_id, f"error: {exc}", error=str(exc))
+
+
+# ── Cloud posture scanning (AWS CSPM) ───────────────────────────────
+class CloudScanRequest(BaseModel):
+    access_key: str
+    secret_key: str
+    session_token: str = ""
+    region: str = "us-east-1"
+    authorization_ref: str
+
+
+async def _run_cloud_task(assessment_id: str, access_key: str, secret_key: str,
+                          session_token: str, region: str) -> None:
+    try:
+        data = await asyncio.to_thread(aws_collect, access_key, secret_key, session_token, region)
+        account = data.get("account", "unknown")
+        findings = cloud_findings(account, data)
+        pipeline = default_pipeline(llm_client=OllamaClient(model="llama3.1:latest", timeout=25.0))
+        for f in findings:
+            if f.finding_kind != FindingKind.INFORMATIONAL:
+                f.validation = await pipeline.validate(f)
+                f.status = f.validation.status
+            _STORE.insert_finding(assessment_id, f)
+        logger.info("cloud assessment %s: %d finding(s) on account %s", assessment_id, len(findings), account)
+        _STORE.set_status(assessment_id, "complete")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cloud assessment %s failed: %s", assessment_id, exc)
+        _STORE.set_status(assessment_id, f"error: {exc}", error=str(exc))
+
+
+@app.post("/api/cloud/assess", response_model=RunAssessmentResponse)
+async def cloud_assess(
+    req: CloudScanRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """AWS cloud posture scan (read-only CSPM). Admin-gated; the operator
+    attests authorization and supplies AWS credentials for an account they are
+    entitled to audit. Credentials are used for the session and never logged or
+    stored; only the authorization reference is kept."""
+    _require_admin(authorization)
+    if not (req.access_key or "").strip() or not (req.secret_key or "").strip():
+        raise HTTPException(400, "AWS access key and secret key are required")
+    if not (req.authorization_ref or "").strip():
+        raise HTTPException(400, "authorization_ref is required — attest authorization to audit this account")
+    caller = _caller_username(request, authorization)
+    assessment_id = str(uuid.uuid4())
+    _STORE.create_assessment(assessment_id=assessment_id, target=f"aws:{req.region}",
+                             modules=["cloud_aws_scan"], llm_model="n/a")
+    asyncio.create_task(_run_cloud_task(
+        assessment_id, req.access_key, req.secret_key, req.session_token, req.region))
+    logger.info("cloud scan started (region=%s, ref=%r, by=%s)",
+                req.region, req.authorization_ref.strip()[:60], caller)
+    return RunAssessmentResponse(assessment_id=assessment_id)
 
 
 # ── Credentialed (authenticated) host scanning ──────────────────────

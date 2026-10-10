@@ -289,6 +289,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
           <button class="btn" id="scan-mobile" title="Upload an Android APK (or iOS IPA) for static analysis">&#128241;&nbsp; Mobile app&hellip;</button>
           <input id="mobile-file" type="file" accept=".apk,.ipa" style="display:none;">
           <button class="btn" id="scan-cred" title="Credentialed SSH host audit (missing updates, hardening)">&#128273;&nbsp; Credentialed host&hellip;</button>
+          <button class="btn" id="scan-cloud" title="AWS cloud posture scan (public S3, open security groups, IAM, …)">&#9729;&nbsp; Cloud (AWS)&hellip;</button>
         </div>
       </div>
     </div>
@@ -324,7 +325,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
   <div class="detail" id="detail-panel"></div>
 </div>
-  <script src="app.js?v=15"></script>
+  <script src="app.js?v=16"></script>
 
 <!-- Credentialed scan modal: collects SSH credentials for a read-only host audit. -->
 <div id="cred-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">
@@ -361,6 +362,43 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:12px;">
       <button class="btn" id="cred-cancel" style="font-size:12px;">Cancel</button>
       <button class="btn primary" id="cred-run" style="font-size:12px;">&#9654;&nbsp; Run audit</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cloud (AWS) scan modal: collects AWS credentials for a read-only CSPM audit. -->
+<div id="cloud-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">
+  <div style="background:var(--bg-1); border:1px solid var(--border-strong); border-radius:12px; max-width:560px; width:90%; max-height:85vh; overflow:auto; padding:20px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+      <h2 style="font-size:15px; font-weight:500;">&#9729; Cloud posture scan (AWS)</h2>
+      <button class="btn" id="cloud-close" style="padding:4px 10px; font-size:12px;">Close</button>
+    </div>
+    <div style="font-size:11.5px; color:var(--text-3); margin-bottom:14px;">
+      Read-only CSPM audit via AWS APIs — public S3, world-open security groups, IAM/MFA, root MFA,
+      public RDS, CloudTrail. Credentials are used only for this session and are <b>never logged or
+      stored</b>. Use a read-only (e.g. SecurityAudit) key for an account you are authorized to assess.
+    </div>
+    <div class="cred-grid">
+      <label style="flex:1 1 100%;">AWS Access Key ID
+        <input id="cloud-ak" type="text" placeholder="AKIA…" autocomplete="off" spellcheck="false">
+      </label>
+      <label style="flex:1 1 100%;">AWS Secret Access Key
+        <input id="cloud-sk" type="password" placeholder="secret access key" autocomplete="new-password">
+      </label>
+      <label style="flex:1 1 100%;">Session token <span style="color:var(--text-3);font-weight:400;">(optional; for temporary credentials)</span>
+        <input id="cloud-st" type="password" placeholder="optional STS session token" autocomplete="new-password">
+      </label>
+      <label style="flex:0 0 160px;">Region
+        <input id="cloud-region" type="text" value="us-east-1" autocomplete="off" spellcheck="false">
+      </label>
+      <label style="flex:1 1 100%;">Authorization reference <span style="color:#f4a3a6;font-weight:400;">(required)</span>
+        <input id="cloud-ref" type="text" placeholder="engagement ID, ticket, or 'my own AWS account'" autocomplete="off">
+      </label>
+    </div>
+    <div id="cloud-msg" style="font-size:12px; margin:10px 0 0; min-height:16px;"></div>
+    <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:12px;">
+      <button class="btn" id="cloud-cancel" style="font-size:12px;">Cancel</button>
+      <button class="btn primary" id="cloud-run" style="font-size:12px;">&#9654;&nbsp; Run scan</button>
     </div>
   </div>
 </div>
