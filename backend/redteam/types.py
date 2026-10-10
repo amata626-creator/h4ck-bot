@@ -40,6 +40,8 @@ class HypothesisKind(str, Enum):
     CSRF = "cross_site_request_forgery"              # CWE-352
     SSRF = "server_side_request_forgery"             # CWE-918
     XXE = "xml_external_entity"                       # CWE-611
+    SSTI = "server_side_template_injection"          # CWE-1336
+    OPEN_REDIRECT = "open_redirect"                   # CWE-601
     SECURITY_MISCONFIG = "security_misconfiguration"  # CWE-16
 
 

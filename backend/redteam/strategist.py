@@ -44,6 +44,12 @@ _KIND_BY_NAME = {
     "xss": HypothesisKind.XSS,
     "ssrf": HypothesisKind.SSRF,
     "xxe": HypothesisKind.XXE,
+    "ssti": HypothesisKind.SSTI,
+    "template": HypothesisKind.SSTI,
+    "template_injection": HypothesisKind.SSTI,
+    "open_redirect": HypothesisKind.OPEN_REDIRECT,
+    "open-redirect": HypothesisKind.OPEN_REDIRECT,
+    "redirect": HypothesisKind.OPEN_REDIRECT,
 }
 _TECH_BY_KIND = {
     HypothesisKind.BOLA: Technique.AUTHZ_TESTING,
@@ -52,6 +58,8 @@ _TECH_BY_KIND = {
     HypothesisKind.XSS: Technique.XSS_TESTING,
     HypothesisKind.SSRF: Technique.API_TESTING,
     HypothesisKind.XXE: Technique.API_TESTING,
+    HypothesisKind.SSTI: Technique.INJECTION_TESTING,
+    HypothesisKind.OPEN_REDIRECT: Technique.API_TESTING,
 }
 
 _SYSTEM = (
@@ -62,7 +70,7 @@ _SYSTEM = (
     "1. You may ONLY name endpoints and parameters that appear in the OBSERVED "
     "SURFACE provided. Never invent a path or a parameter.\n"
     "2. You may only choose a check 'kind' from: bola, idor, injection, xss, "
-    "ssrf, xxe.\n"
+    "ssrf, xxe, ssti, open_redirect.\n"
     "3. Do not repeat anything in ALREADY TRIED.\n"
     "4. Prefer pivots justified by a confirmed finding (same bug class on a "
     "sibling endpoint; chaining two findings).\n"

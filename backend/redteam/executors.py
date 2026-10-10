@@ -47,6 +47,7 @@ class FetchResult:
     status: int
     text: str = ""
     headers: dict = field(default_factory=dict)
+    final_url: str = ""        # URL after following redirects (for open-redirect detection)
 
     def json(self) -> Optional[dict]:
         try:
@@ -887,6 +888,206 @@ class XxeOobExecutor:
         return finding
 
 
+# Template-injection payloads by syntax family. Each is an arithmetic the server
+# would only evaluate if it processes the expression as a template. The products
+# are uncommon 4-digit numbers so a chance match is unlikely, and we require a
+# SECOND, different product to also evaluate before confirming.
+_SSTI_SYNTAXES = [
+    ("Jinja2/Twig {{...}}", "{{%d*%d}}"),
+    ("JSP-EL/Freemarker ${...}", "${%d*%d}"),
+    ("Ruby/Thymeleaf #{...}", "#{%d*%d}"),
+    ("ERB <%%= ... %%>", "<%%= %d*%d %%>"),
+]
+
+
+class SstiExecutor:
+    """Server-Side Template Injection confirmation (CWE-1336).
+
+    Injects an arithmetic template expression (e.g. {{73*79}}) and confirms the
+    server returned the EVALUATED product (5767) while the raw expression did NOT
+    come back verbatim (which would be mere reflection, not evaluation). A second
+    expression with a DIFFERENT product must also evaluate, so a coincidental
+    number in the page can't trigger it. Read-only (GET), inert arithmetic only —
+    no payload that reads files, runs commands, or changes state.
+    """
+
+    handles = {HypothesisKind.SSTI}
+    _A, _B, _C = 73, 79, 83   # products: 73*79=5767, 73*83=6059 (both uncommon)
+
+    async def execute(self, hyp: Hypothesis, ctx: "ExecContext") -> list[Finding]:
+        if not ctx.roe.target_authorized(ctx.target_host):
+            logger.warning("ssti: %s not authorized by RoE - skipping", ctx.target_host)
+            return []
+        base = ctx.base_url or f"https://{ctx.target_host}"
+        findings: list[Finding] = []
+        probed = 0
+        for path in hyp.target_endpoints:
+            for param in hyp.target_params:
+                if probed >= ctx.max_probes:
+                    break
+                probed += 1
+                try:
+                    f = await self._probe(path, param, base, ctx)
+                except Exception as e:  # noqa: BLE001
+                    logger.info("ssti: probe failed %s?%s: %s", path, param, e)
+                    continue
+                if f is not None:
+                    findings.append(f)
+        return findings
+
+    async def _probe(self, path, param, base, ctx) -> Optional[Finding]:
+        p1, p2 = self._A * self._B, self._A * self._C
+        for label, syntax in _SSTI_SYNTAXES:
+            raw1 = syntax % (self._A, self._B)
+            raw2 = syntax % (self._A, self._C)
+            r1 = await ctx.fetch(_with_param(base, path, param, "h4k" + raw1))
+            await asyncio.sleep(ctx.pace_seconds)
+            t1 = r1.text or ""
+            # evaluated iff the product shows AND the raw expression did not echo back
+            if str(p1) not in t1 or raw1 in t1:
+                continue
+            r2 = await ctx.fetch(_with_param(base, path, param, "h4k" + raw2))
+            await asyncio.sleep(ctx.pace_seconds)
+            t2 = r2.text or ""
+            if str(p2) not in t2 or raw2 in t2:
+                continue
+            # both distinct products evaluated -> template injection confirmed
+            tx = (f"GET {r1.url}\nstatus: {r1.status}\n"
+                  f"evaluated {raw1} -> {p1} (raw expression not reflected)\n"
+                  f"second probe {raw2} -> {p2}")
+            diff = (
+                f"Template-evaluation behavior for '{param}' on {path} ({label}):\n"
+                f"  sent {raw1!r} -> response contains {p1} (evaluated), raw expr present: {raw1 in t1}\n"
+                f"  sent {raw2!r} -> response contains {p2} (evaluated), raw expr present: {raw2 in t2}\n"
+                "Two distinct arithmetic expressions were evaluated server-side, not reflected."
+            )
+            asset = Asset(asset_id="a0", name=ctx.target_host, asset_type="web",
+                          scope_approved=True, metadata={"exposure": "internet"})
+            finding = Finding(
+                finding_id=str(uuid.uuid4()),
+                title=f"Server-Side Template Injection via '{param}' on {path}",
+                description=(
+                    f"Parameter '{param}' on {path} is evaluated by a server-side template engine "
+                    f"({label}): the expressions {raw1} and {raw2} returned their computed products "
+                    f"({p1}, {p2}) rather than the literal text. SSTI commonly escalates to remote "
+                    "code execution. Confirmed read-only with inert arithmetic (GET); no file read, "
+                    "command, or state-changing payload was used."
+                ),
+                asset=asset, module_source="ssti_executor",
+                finding_kind=FindingKind.VULNERABILITY,
+                cvss=CvssScore(base_score=9.0, vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"),
+                cwe=WeaknessRef(cwe_id="CWE-1336", name="Server-Side Template Injection"),
+                mitre_techniques=[MitreTechnique(technique_id="T1190", tactic="initial-access",
+                                                 name="Exploit Public-Facing Application")],
+                kill_chain_phase=KillChainPhase.EXPLOITATION,
+                remediation=(
+                    "Never pass user input into template source. Use a sandboxed/logic-less template "
+                    "engine, pass user data only as bound variables, and validate/escape input."
+                ),
+                business_impact="Template injection often leads to remote code execution on the server.",
+            )
+            finding.add_evidence(Evidence.new(
+                evidence_type=EvidenceType.HTTP_TRANSACTION, raw_bytes=tx.encode(),
+                storage_ref=f"mem://ssti/{uuid.uuid4().hex[:8]}",
+                description=f"SSTI evaluation on {path}?{param}", metadata={"preview": tx}))
+            finding.add_evidence(Evidence.new(
+                evidence_type=EvidenceType.BEHAVIORAL_DIFF, raw_bytes=diff.encode(),
+                storage_ref=f"mem://ssti-diff/{uuid.uuid4().hex[:8]}",
+                description="Template-evaluation differential", metadata={"preview": diff}))
+            logger.info("ssti: potential finding on %s?%s (%s)", path, param, label)
+            return finding
+        return None
+
+
+# A benign, inert, resolvable external host used as the open-redirect marker.
+# example.com is IANA-reserved for documentation and serves a static page with no
+# side effects, so following a redirect to it is harmless.
+_REDIRECT_MARKER_HOST = "example.com"
+
+
+class OpenRedirectExecutor:
+    """Open-redirect confirmation (CWE-601).
+
+    Injects a benign off-site URL (https://example.com/...) into a URL-like
+    parameter. If the application issues an HTTP redirect to that external host —
+    i.e. the request lands on example.com — the parameter controls the redirect
+    destination: an open redirect (phishing / OAuth-token-theft primitive). GET
+    only; the marker host is inert. Confirmed by where the request actually
+    ended up (final URL host == the injected host), not by a guessed payload.
+    """
+
+    handles = {HypothesisKind.OPEN_REDIRECT}
+
+    async def execute(self, hyp: Hypothesis, ctx: "ExecContext") -> list[Finding]:
+        if not ctx.roe.target_authorized(ctx.target_host):
+            logger.warning("open-redirect: %s not authorized by RoE - skipping", ctx.target_host)
+            return []
+        base = ctx.base_url or f"https://{ctx.target_host}"
+        findings: list[Finding] = []
+        probed = 0
+        params_order = [p for p in hyp.target_params if p.lower() in URL_PARAM_HINTS] or list(hyp.target_params)
+        for path in hyp.target_endpoints:
+            for param in params_order:
+                if probed >= ctx.max_probes:
+                    break
+                probed += 1
+                token = uuid.uuid4().hex[:8]
+                marker = f"https://{_REDIRECT_MARKER_HOST}/h4ckredir-{token}"
+                try:
+                    probe = await ctx.fetch(_with_param(base, path, param, marker))
+                except Exception as e:  # noqa: BLE001
+                    logger.info("open-redirect: fetch failed %s?%s: %s", path, param, e)
+                    continue
+                await asyncio.sleep(ctx.pace_seconds)
+                final_host = urlsplit(probe.final_url or probe.url).netloc.lower()
+                if not (final_host == _REDIRECT_MARKER_HOST or final_host.endswith("." + _REDIRECT_MARKER_HOST)):
+                    continue  # did not land off-site -> not an open redirect
+                asset = Asset(asset_id="a0", name=ctx.target_host, asset_type="web",
+                              scope_approved=True, metadata={"exposure": "internet"})
+                tx = (f"GET {_with_param(base, path, param, marker)}\n"
+                      f"injected destination: {marker}\nrequest FINAL url: {probe.final_url}\n"
+                      f"final host: {final_host} (off-site)")
+                diff = (
+                    f"Redirect-destination control for '{param}' on {path}:\n"
+                    f"  injected off-site URL -> request ended at host '{final_host}'\n"
+                    f"  the application redirected to the attacker-supplied host ({_REDIRECT_MARKER_HOST})."
+                )
+                finding = Finding(
+                    finding_id=str(uuid.uuid4()),
+                    title=f"Open redirect via '{param}' on {path}",
+                    description=(
+                        f"Parameter '{param}' on {path} controls the redirect destination: an injected "
+                        f"off-site URL ({marker}) caused the request to land on '{final_host}'. An "
+                        "attacker can craft a link on this trusted site that redirects victims to a "
+                        "malicious host (phishing, OAuth/token theft). Confirmed read-only (GET) with a "
+                        "benign marker host; nothing was modified."
+                    ),
+                    asset=asset, module_source="open_redirect_executor",
+                    finding_kind=FindingKind.VULNERABILITY,
+                    cvss=CvssScore(base_score=6.1, vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"),
+                    cwe=WeaknessRef(cwe_id="CWE-601", name="URL Redirection to Untrusted Site (Open Redirect)"),
+                    mitre_techniques=[MitreTechnique(technique_id="T1566", tactic="initial-access",
+                                                     name="Phishing")],
+                    kill_chain_phase=KillChainPhase.EXPLOITATION,
+                    remediation=(
+                        "Do not build redirects from user input. Use a server-side allowlist of permitted "
+                        "destinations (or relative paths only), and reject absolute/off-site URLs."
+                    ),
+                    business_impact="Open redirects enable convincing phishing and OAuth token theft from a trusted domain.",
+                )
+                finding.add_evidence(Evidence.new(
+                    evidence_type=EvidenceType.HTTP_TRANSACTION, raw_bytes=tx.encode(),
+                    storage_ref=f"mem://redir/{uuid.uuid4().hex[:8]}",
+                    description=f"Open-redirect probe on {path}?{param}", metadata={"preview": tx}))
+                finding.add_evidence(Evidence.new(
+                    evidence_type=EvidenceType.BEHAVIORAL_DIFF, raw_bytes=diff.encode(),
+                    storage_ref=f"mem://redir-diff/{uuid.uuid4().hex[:8]}",
+                    description="Redirect-destination control", metadata={"preview": diff}))
+                logger.info("open-redirect: potential finding on %s?%s -> %s", path, param, final_host)
+                findings.append(finding)
+        return findings
+
+
 class ExecutorRegistry:
     """Maps a hypothesis to the executor that can safely check it. Each executor
     is non-destructive (GET-only, inert probes), scope-gated against the RoE, and
@@ -901,6 +1102,8 @@ class ExecutorRegistry:
             InjectionProbeExecutor(),
             SsrfOobExecutor(),
             XxeOobExecutor(),
+            SstiExecutor(),
+            OpenRedirectExecutor(),
         ]
 
     def for_hypothesis(self, hyp: Hypothesis) -> Optional[Executor]:

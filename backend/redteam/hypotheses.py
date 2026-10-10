@@ -199,6 +199,58 @@ class HypothesisGenerator:
                 requires_active_testing=True,
             ))
 
+        # ── 3d. SSTI on endpoints that reflect input ─────────────────────
+        for ep in recon.endpoints:
+            if not ep.params:
+                continue
+            out.append(Hypothesis(
+                hypothesis_id=new_id(),
+                kind=HypothesisKind.SSTI,
+                title=f"Template-injection candidate via {ep.params[:3]} on {ep.path}",
+                target_endpoints=[ep.path],
+                target_params=list(ep.params),
+                rationale=(
+                    f"{ep.path} takes parameter(s) {ep.params[:3]} that may be placed into a server-side "
+                    "template. An inert arithmetic expression that returns its evaluated product (not the "
+                    "literal text) would confirm SSTI. No RCE payload is used — only arithmetic."
+                ),
+                evidence_refs=[f"recon.endpoint:{ep.signature}"],
+                cwe=WeaknessRef(cwe_id="CWE-1336", name="Server-Side Template Injection"),
+                mitre=MitreTechnique(technique_id="T1190", tactic="initial-access",
+                                     name="Exploit Public-Facing Application"),
+                kill_chain_phase=KillChainPhase.EXPLOITATION,
+                estimated_severity=Severity.HIGH,
+                prior_confidence=0.25,
+                suggested_technique=Technique.INJECTION_TESTING,
+                requires_active_testing=True,
+            ))
+
+        # ── 3e. Open redirect on endpoints whose params carry a URL ──────
+        for ep in recon.endpoints:
+            url_params = [p for p in (ep.params or []) if p.lower() in URL_PARAM_HINTS]
+            if not url_params:
+                continue
+            out.append(Hypothesis(
+                hypothesis_id=new_id(),
+                kind=HypothesisKind.OPEN_REDIRECT,
+                title=f"Open-redirect candidate via {url_params[:3]} on {ep.path}",
+                target_endpoints=[ep.path],
+                target_params=url_params,
+                rationale=(
+                    f"{ep.path} takes URL-like parameter(s) {url_params[:3]} that may set a redirect "
+                    "destination. A benign off-site marker that the app redirects to would confirm an "
+                    "open redirect. GET-only; the marker host is inert."
+                ),
+                evidence_refs=[f"recon.endpoint:{ep.signature}"],
+                cwe=WeaknessRef(cwe_id="CWE-601", name="Open Redirect"),
+                mitre=MitreTechnique(technique_id="T1566", tactic="initial-access", name="Phishing"),
+                kill_chain_phase=KillChainPhase.EXPLOITATION,
+                estimated_severity=Severity.MEDIUM,
+                prior_confidence=0.3,
+                suggested_technique=Technique.API_TESTING,
+                requires_active_testing=True,
+            ))
+
         # ── 4. Broken authentication around the login surface ────────────
         if recon.auth.login_paths:
             login = ground(recon.auth.login_paths) or recon.auth.login_paths[:2]

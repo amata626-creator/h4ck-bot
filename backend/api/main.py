@@ -1234,7 +1234,8 @@ def _make_live_fetch(auth: dict | None = None):
         ) as c:
             r = await c.get(url)
             return FetchResult(url=url, status=r.status_code, text=r.text[:200000],
-                               headers={k.lower(): v for k, v in r.headers.items()})
+                               headers={k.lower(): v for k, v in r.headers.items()},
+                               final_url=str(r.url))
     return _live_fetch
 
 

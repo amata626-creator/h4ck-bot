@@ -76,7 +76,7 @@ def observed_surface(recon: ReconResult) -> tuple[set[str], set[str]]:
 def _needs_params(hyp: Hypothesis) -> bool:
     from redteam.types import HypothesisKind
     return hyp.kind in {HypothesisKind.INJECTION, HypothesisKind.XSS, HypothesisKind.SSRF,
-                        HypothesisKind.XXE}
+                        HypothesisKind.XXE, HypothesisKind.SSTI, HypothesisKind.OPEN_REDIRECT}
 
 
 def ground_hypotheses(hyps: list[Hypothesis], recon: ReconResult) -> list[Hypothesis]:
