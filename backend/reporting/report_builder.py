@@ -327,6 +327,36 @@ _KC_ORDER = [
 ]
 
 
+def _fallback_mitre(f: Finding) -> list[tuple]:
+    """Map a finding with no explicit MITRE technique to a well-established
+    ATT&CK technique by its module/CWE, so recon/detection findings (ports,
+    service/version inventory, info disclosure) still contribute ATT&CK coverage.
+    Conservative and documented - only clear mappings, no guessing: a finding we
+    can't map cleanly contributes no technique rather than a wrong one."""
+    cwe = (getattr(f.cwe, "cwe_id", "") or "").upper()
+    src = (f.module_source or "").lower()
+    info = f.finding_kind.value == "informational"
+    # Informational discovery (open ports, service inventory) is service
+    # discovery - check this FIRST, since nmap's service findings share the
+    # 'nmap_cve' module source with the version-inferred CVE findings.
+    if info and (src.startswith("nmap") or src.startswith("discovery")):
+        return [("T1046", "discovery", "Network Service Discovery")]
+    if cwe == "CWE-1035" or ("nmap" in src and "cve" in src):
+        return [("T1595.002", "reconnaissance", "Active Scanning: Vulnerability Scanning")]
+    if cwe == "CWE-200":
+        return [("T1592.002", "reconnaissance", "Gather Victim Host Information: Software")]
+    return []
+
+
+def _finding_techniques(f: Finding) -> list[tuple]:
+    """(id, tactic, name) tuples for a finding: its explicit MITRE techniques,
+    or the documented fallback when it has none."""
+    explicit = getattr(f, "mitre_techniques", None) or []
+    if explicit:
+        return [(m.technique_id, m.tactic, m.name) for m in explicit]
+    return _fallback_mitre(f)
+
+
 def killchain_summary(findings: list[Finding]) -> dict:
     """Group findings by cyber-kill-chain phase and aggregate their MITRE ATT&CK
     techniques. Pure + shared by the report and the dashboard endpoint, so both
@@ -345,9 +375,9 @@ def killchain_summary(findings: list[Finding]) -> dict:
                 "status": f.status.value,
                 "informational": f.finding_kind.value == "informational",
             })
-        for m in (getattr(f, "mitre_techniques", None) or []):
-            e = techniques.setdefault(m.technique_id, {
-                "id": m.technique_id, "tactic": m.tactic, "name": m.name, "count": 0})
+        for tid, tactic, name in _finding_techniques(f):
+            e = techniques.setdefault(tid, {
+                "id": tid, "tactic": tactic, "name": name, "count": 0})
             e["count"] += 1
     phases = []
     for p, label in _KC_ORDER:

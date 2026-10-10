@@ -1004,8 +1004,12 @@ class SstiExecutor:
                 finding_kind=FindingKind.VULNERABILITY,
                 cvss=CvssScore(base_score=9.0, vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"),
                 cwe=WeaknessRef(cwe_id="CWE-1336", name="Server-Side Template Injection"),
-                mitre_techniques=[MitreTechnique(technique_id="T1190", tactic="initial-access",
-                                                 name="Exploit Public-Facing Application")],
+                mitre_techniques=[
+                    MitreTechnique(technique_id="T1190", tactic="initial-access",
+                                   name="Exploit Public-Facing Application"),
+                    MitreTechnique(technique_id="T1059", tactic="execution",
+                                   name="Command and Scripting Interpreter"),
+                ],
                 kill_chain_phase=KillChainPhase.EXPLOITATION,
                 remediation=(
                     "Never pass user input into template source. Use a sandboxed/logic-less template "
