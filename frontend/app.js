@@ -251,7 +251,7 @@ function statusLabel(status, findingKind) {
 }
 
 // ── API ─────────────────────────────────────────────────────────────
-async function startAssessment(target, modules, llmModel, authCookie) {
+async function startAssessment(target, modules, llmModel, authCookie, authorized, authorizationRef) {
   // /api/assessments/run is gated by the same admin token as the
   // proposal endpoints. The token is read from sessionStorage (set
   // when the user pastes it in the Propose form). If it's missing,
@@ -267,6 +267,7 @@ async function startAssessment(target, modules, llmModel, authCookie) {
     body: JSON.stringify({
       target, modules, llm_model: llmModel,
       ...(authCookie ? { auth_cookie: authCookie } : {}),
+      ...(authorized ? { authorized: true, authorization_ref: (authorizationRef || "").trim() } : {}),
     }),
   });
   if (!resp.ok) {
@@ -1041,6 +1042,8 @@ async function startScanFromForm() {
   const target = ($("#target-input")?.value || "").trim();
   const llmModel = ($("#llm-model")?.value || "llama3.1:latest").trim() || "llama3.1:latest";
   const authCookie = ($("#auth-cookie")?.value || "").trim();
+  const authorized = !!$("#authz-confirm")?.checked;
+  const authorizationRef = ($("#authz-ref")?.value || "").trim();
 
   if (!target) {
     alert("Enter a target hostname or IP.");
@@ -1048,10 +1051,25 @@ async function startScanFromForm() {
     return;
   }
 
+  // Universal scope, launch-time authorization: the operator must tick the
+  // authorization box and give a reference for any target not already on
+  // record. This is logged — it's what keeps every scan an authorized one.
+  if (!authorized || !authorizationRef) {
+    alert(
+      "Authorization required.\n\n" +
+      "Tick \"I confirm I am authorized to assess this target\" and enter an " +
+      "authorization reference (engagement ID, bug-bounty URL, or \"my own " +
+      "infrastructure\"). This is recorded to the audit trail.\n\n" +
+      "Scanning a system you are not authorized to test may be illegal."
+    );
+    (authorizationRef ? $("#authz-confirm") : $("#authz-ref"))?.focus();
+    return;
+  }
+
   try {
     updateRunBadge("running", 0);
     const rpt = $("#view-report"); if (rpt) rpt.disabled = false;
-    assessmentId = await startAssessment(target, DEFAULT_MODULES, llmModel, authCookie);
+    assessmentId = await startAssessment(target, DEFAULT_MODULES, llmModel, authCookie, authorized, authorizationRef);
     findings = [];
     selectedFindingId = null;
     renderStats();

@@ -267,6 +267,15 @@ class RunAssessmentRequest(BaseModel):
     # the login, not just the public surface.
     auth_cookie: str = ""
     auth_headers: dict = {}
+    # Universal scope: the operator may scan ANY target without pre-registering
+    # it in scope.yaml, but every scan of a not-yet-authorized target must carry
+    # an authorization attestation, which is recorded to the audit trail. This
+    # is the single guardrail that keeps the platform an *authorized* VAPT tool
+    # rather than an unauthenticated scanner. `authorized` is the operator's
+    # one-click "I am authorized to assess this target"; `authorization_ref` is
+    # the free-text engagement reference that attestation is logged under.
+    authorized: bool = False
+    authorization_ref: str = ""
 
 
 class RunAssessmentResponse(BaseModel):
@@ -441,6 +450,15 @@ def _is_authorized(target: str) -> bool:
     return _resolve_scope(target) is not None
 
 
+def _normalize_host(target: str) -> str:
+    """Strip scheme/path/port from a pasted target, leaving the bare host."""
+    host = (target or "").strip().lower()
+    host = host.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    if not host or " " in host:
+        return ""
+    return host
+
+
 def _build_roe_for(assessment_id: str, target: str):
     s = _resolve_scope(target)
     if s is None:
@@ -507,10 +525,8 @@ async def add_authorized_target(
     authorization reference — this is still authorized-testing-only, just not
     confined to scope.yaml. Admin/session gated and audited."""
     _require_admin(authorization)
-    host = (req.host or "").strip().lower()
-    # strip any scheme/path the user pasted
-    host = host.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
-    if not host or " " in host:
+    host = _normalize_host(req.host)
+    if not host:
         raise HTTPException(400, "invalid host")
     if not (req.authorization_ref or "").strip():
         raise HTTPException(400, "authorization_ref is required — you must attest authorization to test this target")
@@ -578,12 +594,33 @@ async def run_assessment(
     if unknown:
         raise HTTPException(400, f"unknown module(s): {unknown}")
 
+    # Universal scope with launch-time authorization. Any target is scannable,
+    # but a target not already on record (scope.yaml or a prior runtime
+    # attestation) must carry an authorization attestation IN THIS request. We
+    # record that attestation to the audit trail and proceed - no separate
+    # pre-registration step. The attestation (not an allowlist) is what keeps
+    # every scan an authorized one.
     if not _is_authorized(req.target):
-        raise HTTPException(
-            403,
-            f"target '{req.target}' is not authorized yet. Authorize it with an "
-            "authorization reference (POST /api/scope/targets) and scan again.",
+        if not (req.authorized and (req.authorization_ref or "").strip()):
+            raise HTTPException(
+                403,
+                f"target '{req.target}' has no authorization on record. Re-submit with "
+                "authorized=true and an authorization_ref attesting you are permitted to "
+                "test it (the dashboard's authorization checkbox does this for you).",
+            )
+        host = _normalize_host(req.target)
+        if not host:
+            raise HTTPException(400, f"invalid target host: {req.target!r}")
+        caller = _caller_username(request, authorization)
+        _STORE.add_authorized_target(
+            host=host, authorization_ref=req.authorization_ref.strip(),
+            note="operator-attested at scan launch",
+            active_testing_permitted=True, added_by=caller,
         )
+        _ip = request.client.host if request.client else "unknown"
+        logger.info("scope: %s attested authorization for '%s' at scan launch "
+                    "(ref=%r, ip=%s)", caller, host,
+                    req.authorization_ref.strip()[:80], _ip)
 
     # Per-client rate limiting: 2 concurrent scans, 10 per 60s.
     # Independent of the API-wide token bucket - that one limits all

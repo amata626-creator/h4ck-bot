@@ -275,6 +275,24 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
         </div>
       </div>
 
+      <div class="scan-row" id="authz-row" style="align-items:flex-end;">
+        <div class="scan-field" style="flex:1 1 340px;">
+          <label for="authz-ref">
+            Authorization reference <span class="opt">engagement ID, ticket, bug-bounty URL, or "my own infrastructure"</span>
+          </label>
+          <input id="authz-ref" type="text"
+                 placeholder="required for any new target — recorded to the audit trail"
+                 autocomplete="off" spellcheck="false">
+        </div>
+        <div class="scan-field" style="flex:1 1 auto;">
+          <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:500; color:var(--text-1);">
+            <input id="authz-confirm" type="checkbox" style="cursor:pointer; width:auto;">
+            I confirm I am authorized to assess this target
+          </label>
+          <span class="opt" style="display:block; margin-top:5px;">Scanning a system you are not authorized to test may be illegal. This attestation is logged with your operator identity and time.</span>
+        </div>
+      </div>
+
       <div class="launcher-divider"></div>
 
       <div class="scan-row" style="align-items:center;">
@@ -321,7 +339,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
   <div class="detail" id="detail-panel"></div>
 </div>
-  <script src="app.js?v=17"></script>
+  <script src="app.js?v=18"></script>
 
 <!-- Credentialed scan modal: collects SSH credentials for a read-only host audit. -->
 <div id="cred-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">
