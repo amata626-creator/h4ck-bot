@@ -136,9 +136,18 @@ fi
 
 # ── 9. Nuclei check (optional — template/CVE detection engine) ─────
 say "Checking Nuclei (detection engine, optional)"
-if command -v nuclei >/dev/null 2>&1; then
-  ok "nuclei found: $(nuclei -version 2>&1 | head -1)"
-  if nuclei -update-templates -silent >/dev/null 2>&1; then
+# Resolve nuclei the same way the module does: PATH first, then well-known
+# install locations (a non-interactive shell here may lack /usr/local/bin or
+# ~/go/bin even though the service and an interactive shell have it).
+NUCLEI_BIN="$(command -v nuclei 2>/dev/null || true)"
+if [ -z "$NUCLEI_BIN" ]; then
+  for cand in /usr/local/bin/nuclei /usr/bin/nuclei "$HOME/go/bin/nuclei" /root/go/bin/nuclei /home/ubuntu/go/bin/nuclei; do
+    if [ -x "$cand" ]; then NUCLEI_BIN="$cand"; break; fi
+  done
+fi
+if [ -n "$NUCLEI_BIN" ]; then
+  ok "nuclei found: $("$NUCLEI_BIN" -version 2>&1 | head -1) ($NUCLEI_BIN)"
+  if "$NUCLEI_BIN" -update-templates -silent >/dev/null 2>&1; then
     ok "nuclei templates updated"
   else
     warn "could not update nuclei templates (offline?) — existing templates still used"
