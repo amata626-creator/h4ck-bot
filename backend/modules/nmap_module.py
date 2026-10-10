@@ -88,25 +88,28 @@ def parse_nmap_xml(xml_bytes: bytes) -> list[ServiceInfo]:
     return out
 
 
-def _cpe_parts(cpe: str) -> tuple[str, str, str]:
-    """(vendor, product, version) from a CPE 2.2 (cpe:/a:v:p:ver) or 2.3
-    (cpe:2.3:a:v:p:ver:...) string. Missing fields come back empty."""
+def _cpe_parts(cpe: str) -> tuple[str, str, str, str]:
+    """(part, vendor, product, version) from a CPE 2.2 (cpe:/a:v:p:ver) or 2.3
+    (cpe:2.3:a:v:p:ver:...) string. `part` is 'a' (application), 'o' (OS) or
+    'h' (hardware). Missing fields come back empty."""
     s = cpe
     if s.startswith("cpe:2.3:"):
         f = s.split(":")
         # cpe:2.3:part:vendor:product:version:...
+        part = f[2] if len(f) > 2 else ""
         vendor = f[3] if len(f) > 3 else ""
         product = f[4] if len(f) > 4 else ""
         version = f[5] if len(f) > 5 and f[5] not in ("*", "-") else ""
-        return vendor, product, version
+        return part, vendor, product, version
     if s.startswith("cpe:/"):
         f = s[len("cpe:/"):].split(":")
         # part:vendor:product:version
+        part = f[0] if len(f) > 0 else ""
         vendor = f[1] if len(f) > 1 else ""
         product = f[2] if len(f) > 2 else ""
         version = f[3] if len(f) > 3 else ""
-        return vendor, product, version
-    return "", "", ""
+        return part, vendor, product, version
+    return "", "", "", ""
 
 
 class NmapModule(ScannerModule):
@@ -172,7 +175,13 @@ class NmapModule(ScannerModule):
                 continue
             seen_cves: set[str] = set()
             for cpe in si.cpes:
-                vendor, product, version = _cpe_parts(cpe)
+                part, vendor, product, version = _cpe_parts(cpe)
+                # Only APPLICATION CPEs carry this service's CVEs. nmap also
+                # reports an OS CPE (e.g. cpe:/o:canonical:ubuntu_linux) for the
+                # host; correlating that would pin the entire distro/kernel CVE
+                # list onto, say, the SSH service - a flood of false positives.
+                if part and part != "a":
+                    continue
                 version = version or si.version
                 if not product or not version:
                     continue

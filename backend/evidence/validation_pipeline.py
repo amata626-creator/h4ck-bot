@@ -13,7 +13,7 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 
-from core.schema import Finding, ValidationLayerResult, ValidationResult
+from core.schema import EvidenceType, Finding, ValidationLayerResult, ValidationResult
 
 
 class ValidationLayer(abc.ABC):
@@ -39,9 +39,20 @@ class EvidenceCorrelationLayer(ValidationLayer):
     """Layer 5 - require multiple independent evidence types."""
     name = "evidence_correlation"
     MIN_INDEPENDENT_EVIDENCE = 2
+    # Documentary evidence records CONTEXT but is not an independent *detection*
+    # of the vulnerability, so it must never count toward corroboration. A
+    # full-page screenshot of the web root is attached to every web-facing
+    # finding after the scan; without this exclusion that homepage photo would
+    # silently satisfy the 2-evidence requirement and promote version-inferred
+    # CVEs (and other single-signal findings) from NEEDS_REVIEW to VALIDATED -
+    # exactly the false-positive inflation this layer exists to prevent.
+    _DOCUMENTARY_EVIDENCE = frozenset({EvidenceType.SCREENSHOT})
 
     async def evaluate(self, finding: Finding) -> ValidationLayerResult:
-        distinct_types = {e.evidence_type for e in finding.evidence}
+        distinct_types = {
+            e.evidence_type for e in finding.evidence
+            if e.evidence_type not in self._DOCUMENTARY_EVIDENCE
+        }
 
         # Deterministic, single-observation findings (missing headers, TLS
         # version, open port) are proven by one authoritative evidence item;
