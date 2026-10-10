@@ -47,6 +47,30 @@ _RUN_TIMEOUT_S = 300.0
 _MAX_FINDINGS = 300
 
 
+_USER_AGENT = "h4ckbot-nuclei/0.1 (+authorized-assessment)"
+
+
+def build_nuclei_cmd(target: str, auth: dict | None = None) -> list[str]:
+    """Build the nuclei command. Non-destructive tag set, matched request/
+    response for evidence, and — when a session is supplied — authenticated
+    headers so nuclei scans behind the login too."""
+    cmd = [
+        "nuclei", "-target", target,
+        "-jsonl", "-silent", "-no-color", "-disable-update-check",
+        "-severity", _DEFAULT_SEVERITIES,
+        "-exclude-tags", _DEFAULT_EXCLUDE_TAGS,
+        "-rate-limit", "50", "-timeout", "10", "-retries", "1",
+        "-include-rr",
+        "-H", f"User-Agent: {_USER_AGENT}",
+    ]
+    auth = auth or {}
+    for k, v in (auth.get("headers") or {}).items():
+        cmd += ["-H", f"{k}: {v}"]
+    if auth.get("cookie"):
+        cmd += ["-H", f"Cookie: {auth['cookie']}"]
+    return cmd
+
+
 class NucleiModule(ScannerModule):
     @property
     def capabilities(self) -> ModuleCapabilities:
@@ -64,24 +88,21 @@ class NucleiModule(ScannerModule):
             logger.info("nuclei binary not found on PATH - skipping (install it to enable CVE/template coverage)")
             return
 
+        auth = (ctx.config or {}).get("auth") or {}
         for asset in ctx.assets:
             if asset.asset_type not in self.capabilities.supported_asset_types:
                 continue
             self.assert_in_scope(asset, ctx)
             target = asset.name if "://" in asset.name else f"https://{asset.name}"
-            async for finding in self._scan(asset, target):
+            async for finding in self._scan(asset, target, auth):
                 yield finding
 
-    async def _scan(self, asset: Asset, target: str):
-        cmd = [
-            "nuclei", "-target", target,
-            "-jsonl", "-silent", "-no-color", "-disable-update-check",
-            "-severity", _DEFAULT_SEVERITIES,
-            "-exclude-tags", _DEFAULT_EXCLUDE_TAGS,
-            "-rate-limit", "50", "-timeout", "10", "-retries", "1",
-            "-include-rr",   # include matched request/response for evidence
-        ]
-        logger.info("nuclei: scanning %s", target)
+    async def _scan(self, asset: Asset, target: str, auth: dict | None = None):
+        cmd = build_nuclei_cmd(target, auth)
+        if auth and (auth.get("cookie") or auth.get("headers")):
+            logger.info("nuclei: scanning %s (AUTHENTICATED)", target)
+        else:
+            logger.info("nuclei: scanning %s", target)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,

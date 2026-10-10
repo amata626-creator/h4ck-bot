@@ -77,6 +77,7 @@ class Orchestrator:
                 assets=eligible,
                 roe=roe,
                 automation_level=automation_level,
+                config={"auth": run.auth or {}},
             )
             run._log(f"module {module.capabilities.module_id} running against "
                      f"{len(eligible)} asset(s)")
