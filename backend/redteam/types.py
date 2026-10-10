@@ -39,6 +39,7 @@ class HypothesisKind(str, Enum):
     MASS_ASSIGNMENT = "mass_assignment"              # CWE-915
     CSRF = "cross_site_request_forgery"              # CWE-352
     SSRF = "server_side_request_forgery"             # CWE-918
+    XXE = "xml_external_entity"                       # CWE-611
     SECURITY_MISCONFIG = "security_misconfiguration"  # CWE-16
 
 

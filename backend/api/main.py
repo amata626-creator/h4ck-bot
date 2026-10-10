@@ -1067,9 +1067,32 @@ def _make_live_fetch(auth: dict | None = None):
     return _live_fetch
 
 
+def _make_live_post(auth: dict | None = None):
+    """Build the body-POST used only by the XXE executor for its inert,
+    detection-only XML payload. Carries the auth session like the GET fetch."""
+    auth = auth or {}
+    extra: dict[str, str] = {}
+    for _k, _v in (auth.get("headers") or {}).items():
+        extra[str(_k)] = str(_v)
+    if auth.get("cookie"):
+        extra["Cookie"] = str(auth["cookie"])
+
+    async def _live_post(url: str, body: bytes, content_type: str) -> FetchResult:
+        headers = dict(extra)
+        headers["Content-Type"] = content_type
+        async with httpx.AsyncClient(
+            verify=False, timeout=10.0, follow_redirects=True, headers=headers,
+        ) as c:
+            r = await c.post(url, content=body)
+            return FetchResult(url=url, status=r.status_code, text=r.text[:200000],
+                               headers={k.lower(): v for k, v in r.headers.items()})
+    return _live_post
+
+
 def _make_exec_factory(semantic, roe, base_url: str, auth: dict | None = None):
     host = roe.authorized_targets[0] if roe.authorized_targets else ""
     fetch = _make_live_fetch(auth)
+    poster = _make_live_post(auth)
     from oob.listener import oob_base_url
     oob_base = oob_base_url()
 
@@ -1078,7 +1101,7 @@ def _make_exec_factory(semantic, roe, base_url: str, auth: dict | None = None):
             target_host=host, roe=roe, fetch=fetch,
             candidate_ids=["1", "2", "3"],
             owner_field=_owner_field_for(semantic, hyp.target_endpoints),
-            base_url=base_url, oob_base_url=oob_base,
+            base_url=base_url, oob_base_url=oob_base, post=poster,
         )
     return factory
 

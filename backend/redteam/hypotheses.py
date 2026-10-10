@@ -169,6 +169,36 @@ class HypothesisGenerator:
                 requires_active_testing=True,
             ))
 
+        # ── 3c. Blind XXE on XML-accepting endpoints ─────────────────────
+        for ep in recon.endpoints:
+            ct = (ep.content_type or "").lower()
+            p = (ep.path or "").lower()
+            looks_xml = ("xml" in ct) or any(h in p for h in ("soap", "xmlrpc", "/xml", ".xml", "wsdl"))
+            posts = "POST" in (ep.methods or []) or not ep.methods
+            if not (looks_xml and posts):
+                continue
+            out.append(Hypothesis(
+                hypothesis_id=new_id(),
+                kind=HypothesisKind.XXE,
+                title=f"Blind XXE candidate on {ep.path}",
+                target_endpoints=[ep.path],
+                target_params=[],
+                rationale=(
+                    f"{ep.path} appears to consume XML. An inert, detection-only external entity "
+                    "pointing at our listener would, if resolved, confirm blind XXE out-of-band. "
+                    "No file read or exfiltration is attempted — only an HTTP callback."
+                ),
+                evidence_refs=[f"recon.endpoint:{ep.signature}"],
+                cwe=WeaknessRef(cwe_id="CWE-611", name="XML External Entity (XXE)"),
+                mitre=MitreTechnique(technique_id="T1190", tactic="initial-access",
+                                     name="Exploit Public-Facing Application"),
+                kill_chain_phase=KillChainPhase.EXPLOITATION,
+                estimated_severity=Severity.HIGH,
+                prior_confidence=0.3,
+                suggested_technique=Technique.API_TESTING,
+                requires_active_testing=True,
+            ))
+
         # ── 4. Broken authentication around the login surface ────────────
         if recon.auth.login_paths:
             login = ground(recon.auth.login_paths) or recon.auth.login_paths[:2]

