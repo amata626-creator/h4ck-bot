@@ -1342,10 +1342,18 @@ async def _run_redteam_pipeline(
         _REDTEAM_REGISTRY, default_pipeline(llm_client=OllamaClient(model=llm_model, timeout=25.0)),
     )
     factory = _make_exec_factory(semantic, roe, base_url, auth=auth)
+    # The AI strategist drives the adaptive loop (observe -> reason -> pivot). It
+    # only acts where auto steps execute, so it's wired for autonomous runs; it's
+    # best-effort (Ollama down -> loop just ends with the seed findings) and the
+    # orchestrator re-grounds everything it proposes, so it can't invent targets.
+    strategist = None
+    if automation_level == "autonomous":
+        from redteam.strategist import LlmStrategist
+        strategist = LlmStrategist(model=llm_model, timeout=min(llm_timeout, 60.0))
     result = await orch.assess(
         assessment_id=assessment_id, target=target, roe=roe,
         automation_level=automation_level, recon=recon,
-        semantic=semantic, exec_factory=factory,
+        semantic=semantic, exec_factory=factory, strategist=strategist,
     )
     # Screenshot each finding at its OWN url (the reflected-XSS page, the
     # probed endpoint), carrying the session so authenticated pages render —
