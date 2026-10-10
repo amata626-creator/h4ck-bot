@@ -122,6 +122,13 @@ if curl -fsS "$OLLAMA_URL/api/tags" >/dev/null 2>&1; then
   ok "Ollama is reachable at $OLLAMA_URL"
   if curl -fsS "$OLLAMA_URL/api/tags" | grep -q "\"$OLLAMA_MODEL"; then
     ok "model '$OLLAMA_MODEL' is available"
+    if [ -n "${H4CK_BOT_REASONING_MODEL:-}" ]; then
+      ok "AI reasoning layers use '$H4CK_BOT_REASONING_MODEL' (H4CK_BOT_REASONING_MODEL)"
+    else
+      warn "AI layers (semantic/strategist/attack-paths) use the scan model. On a"
+      warn "slow/CPU host an 8B model can time out; set a fast reasoning model, e.g.:"
+      warn "    ollama pull qwen2.5:3b && export H4CK_BOT_REASONING_MODEL=qwen2.5:3b"
+    fi
   else
     warn "model '$OLLAMA_MODEL' not pulled yet. Pull it with:"
     warn "    ollama pull $OLLAMA_MODEL"

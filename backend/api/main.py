@@ -558,6 +558,42 @@ async def remove_authorized_target(
 _DEFAULT_LLM_MODEL = "llama3.1:latest"
 
 
+def _ollama_base() -> str:
+    return os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+
+
+def _reasoning_model(scan_model: str) -> str:
+    """The model used for the AI reasoning layers (semantic understanding,
+    adaptive strategist, attack-path chaining). Defaults to the scan model, but
+    H4CK_BOT_REASONING_MODEL overrides it — so you can keep a strong model on the
+    record while running a FAST model (e.g. qwen2.5:3b) for the interactive AI
+    loop, which matters a lot on CPU-only hosts where an 8B model times out."""
+    return os.environ.get("H4CK_BOT_REASONING_MODEL", "").strip() or scan_model
+
+
+def _reasoning_timeout(default: float) -> float:
+    v = os.environ.get("H4CK_BOT_REASONING_TIMEOUT", "").strip()
+    try:
+        return float(v) if v else default
+    except ValueError:
+        return default
+
+
+async def _prewarm_model(model: str, timeout: float) -> None:
+    """Best-effort: load the model into Ollama (num_predict=1, keep_alive) BEFORE
+    the first real reasoning call, so the one-time cold-load cost doesn't get
+    counted inside — and blow — that call's timeout. Any failure is ignored."""
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            await c.post(f"{_ollama_base()}/api/generate", json={
+                "model": model, "prompt": "ready?", "stream": False,
+                "keep_alive": "10m", "options": {"num_predict": 1},
+            })
+        logger.info("reasoning: pre-warmed model %s", model)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("reasoning: pre-warm of %s skipped (%s)", model, exc)
+
+
 @app.get("/api/models")
 async def list_models():
     """Local LLMs available via Ollama, for the model dropdown. Graceful: if
@@ -1322,7 +1358,8 @@ async def _compose_attack_paths(assessment_id: str, llm_model: str, llm_timeout:
     lights up). Grounded + best-effort; no-op when nothing chains."""
     from redteam.attack_paths import AttackPathChainer, attack_path_to_dict
     findings = _STORE.list_findings(assessment_id)
-    chainer = AttackPathChainer(model=llm_model, timeout=min(llm_timeout, 60.0))
+    r_model = _reasoning_model(llm_model)
+    chainer = AttackPathChainer(model=r_model, timeout=_reasoning_timeout(max(llm_timeout, 120.0)))
     paths = await chainer(findings)
     if not paths:
         return
@@ -1364,10 +1401,15 @@ async def _run_redteam_pipeline(
     if recon is None:
         raise RuntimeError("recon produced no result")
 
-    # 2. semantic model (local LLM). Degrade gracefully on timeout/failure to
-    # recon-only hypotheses (injection/XSS/auth still generated).
+    # 2. semantic model (local LLM). Uses the REASONING model (may differ from
+    # the scan model - a fast model here keeps the AI layers alive on slow
+    # hosts), pre-warmed so cold-load doesn't blow the timeout. Degrades
+    # gracefully on timeout/failure to recon-only hypotheses.
+    r_model = _reasoning_model(llm_model)
+    r_timeout = _reasoning_timeout(max(llm_timeout, 180.0))
+    await _prewarm_model(r_model, timeout=r_timeout)
     try:
-        semantic = await SemanticModelBuilder(model=llm_model, timeout=llm_timeout).build(recon)
+        semantic = await SemanticModelBuilder(model=r_model, timeout=r_timeout).build(recon)
     except Exception as exc:  # noqa: BLE001
         from semantic.types import SemanticModel
         logger.warning("redteam %s: semantic model unavailable (%s) - recon-only",
@@ -1387,7 +1429,7 @@ async def _run_redteam_pipeline(
     strategist = None
     if automation_level == "autonomous":
         from redteam.strategist import LlmStrategist
-        strategist = LlmStrategist(model=llm_model, timeout=min(llm_timeout, 60.0))
+        strategist = LlmStrategist(model=r_model, timeout=min(r_timeout, 120.0))
     result = await orch.assess(
         assessment_id=assessment_id, target=target, roe=roe,
         automation_level=automation_level, recon=recon,
