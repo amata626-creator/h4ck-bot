@@ -780,6 +780,22 @@ async function boot() {
     });
   }
 
+  // Credentialed scan: open the SSH credentials modal.
+  const credBtn = $("#scan-cred");
+  const credModal = $("#cred-modal");
+  const closeCred = () => { if (credModal) credModal.style.display = "none"; };
+  if (credBtn && credModal) {
+    credBtn.addEventListener("click", () => {
+      const m = $("#cred-msg"); if (m) m.textContent = "";
+      credModal.style.display = "flex";
+      $("#cred-host")?.focus();
+    });
+    $("#cred-close")?.addEventListener("click", closeCred);
+    $("#cred-cancel")?.addEventListener("click", closeCred);
+    credModal.addEventListener("click", (e) => { if (e.target === credModal) closeCred(); });
+    $("#cred-run")?.addEventListener("click", startCredentialedScan);
+  }
+
   // Enter in the target field also starts a scan.
   const targetInput = $("#target-input");
   if (targetInput) {
@@ -856,6 +872,51 @@ async function loadModels() {
     sel.value = models.includes(current) ? current : (models.includes(dflt) ? dflt : models[0]);
   } catch (_e) {
     // leave the static default option in place
+  }
+}
+
+async function startCredentialedScan() {
+  const host = ($("#cred-host")?.value || "").trim();
+  const username = ($("#cred-user")?.value || "").trim();
+  const password = $("#cred-pass")?.value || "";
+  const privateKey = $("#cred-key")?.value || "";
+  const port = parseInt($("#cred-port")?.value || "22", 10) || 22;
+  const authRef = ($("#cred-ref")?.value || "").trim();
+  const msg = $("#cred-msg");
+  const setMsg = (t, ok) => { if (msg) { msg.textContent = t; msg.style.color = ok ? "var(--validated)" : "#f4a3a6"; } };
+
+  if (!host) return setMsg("Enter a host.", false);
+  if (!username) return setMsg("Enter an SSH username.", false);
+  if (!password && !privateKey.trim()) return setMsg("Enter a password or paste a private key.", false);
+  if (!authRef) return setMsg("Authorization reference is required.", false);
+
+  const token = sessionStorage.getItem("h4ck_admin_token") || "";
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  setMsg("Connecting over SSH and auditing…", true);
+  try {
+    const resp = await fetch(`${API_BASE}/api/credentialed/assess`, {
+      method: "POST", headers,
+      body: JSON.stringify({ host, username, password, private_key: privateKey, port, authorization_ref: authRef }),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text()}`);
+    const { assessment_id } = await resp.json();
+    // clear sensitive fields immediately
+    if ($("#cred-pass")) $("#cred-pass").value = "";
+    if ($("#cred-key")) $("#cred-key").value = "";
+    const m = $("#cred-modal"); if (m) m.style.display = "none";
+    assessmentId = assessment_id;
+    findings = []; selectedFindingId = null;
+    updateRunBadge("running", 0);
+    const rpt = $("#view-report"); if (rpt) rpt.disabled = false;
+    renderStats(); renderFindingsTable(); startPolling();
+  } catch (e) {
+    const m2 = e.message || String(e);
+    if (m2.includes("401") || m2.toLowerCase().includes("admin token")) {
+      setMsg("Admin token required — open Authorized scope and paste it.", false);
+    } else {
+      setMsg(`Failed: ${m2}`, false);
+    }
   }
 }
 

@@ -91,6 +91,10 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 .launcher-label { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-2); display: flex; align-items: center; gap: 8px; }
 .launcher-badge { font-size: 10px; font-weight: 500; letter-spacing: .02em; text-transform: none; color: var(--text-3); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
 .launcher-divider { height: 1px; background: var(--border); margin: 2px 0; }
+.cred-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.cred-grid label { display: flex; flex-direction: column; gap: 4px; flex: 1 1 100%; font-size: 11px; color: var(--text-2); font-weight: 600; letter-spacing: .02em; }
+.cred-grid input, .cred-grid textarea { background: var(--bg-3); color: var(--text-1); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12.5px; font-family: inherit; font-weight: 400; box-sizing: border-box; }
+.cred-grid input:focus, .cred-grid textarea:focus { outline: none; border-color: var(--border-strong); }
 .scan-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
 .scan-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .scan-field label { font-size: 11px; color: var(--text-2); letter-spacing: .02em; }
@@ -288,6 +292,19 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
           <input id="mobile-file" type="file" accept=".apk,.ipa" style="display:none;">
         </div>
       </div>
+
+      <div class="launcher-divider"></div>
+
+      <div class="launcher-label">&#128273;&nbsp; Credentialed infra scan <span class="launcher-badge">authenticated · read-only</span></div>
+      <div class="scan-row">
+        <div class="scan-field" style="flex:1 1 420px;">
+          <label>Audit a host from the inside over SSH — missing security updates, SSH hardening, and service inventory.</label>
+          <div style="color:var(--text-3); font-size:11px;">Read-only · credentials are used for the connection and <b>never stored</b> · authorized hosts only</div>
+        </div>
+        <div class="scan-actions">
+          <button class="btn primary" id="scan-cred" title="Credentialed SSH host audit">&#128273;&nbsp; Credentialed scan&hellip;</button>
+        </div>
+      </div>
     </div>
 
     <div class="stat-row">
@@ -321,7 +338,46 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
   <div class="detail" id="detail-panel"></div>
 </div>
-  <script src="app.js?v=13"></script>
+  <script src="app.js?v=14"></script>
+
+<!-- Credentialed scan modal: collects SSH credentials for a read-only host audit. -->
+<div id="cred-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">
+  <div style="background:var(--bg-1); border:1px solid var(--border-strong); border-radius:12px; max-width:560px; width:90%; max-height:85vh; overflow:auto; padding:20px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+      <h2 style="font-size:15px; font-weight:500;">&#128273; Credentialed infra scan</h2>
+      <button class="btn" id="cred-close" style="padding:4px 10px; font-size:12px;">Close</button>
+    </div>
+    <div style="font-size:11.5px; color:var(--text-3); margin-bottom:14px;">
+      Read-only audit over SSH. Credentials are used only for this connection and are
+      <b>never logged or stored</b> — only the authorization reference is kept. Authorized hosts only.
+    </div>
+    <div class="cred-grid">
+      <label>Host / IP
+        <input id="cred-host" type="text" placeholder="e.g. 10.0.0.5 or host.example.com" autocomplete="off" spellcheck="false">
+      </label>
+      <label style="flex:0 0 110px;">SSH port
+        <input id="cred-port" type="number" value="22" min="1" max="65535">
+      </label>
+      <label style="flex:1 1 100%;">SSH username
+        <input id="cred-user" type="text" placeholder="e.g. ubuntu" autocomplete="off" spellcheck="false">
+      </label>
+      <label style="flex:1 1 100%;">Password <span style="color:var(--text-3);font-weight:400;">(or paste a private key below)</span>
+        <input id="cred-pass" type="password" placeholder="SSH password" autocomplete="new-password">
+      </label>
+      <label style="flex:1 1 100%;">Private key <span style="color:var(--text-3);font-weight:400;">(optional; OpenSSH/PEM)</span>
+        <textarea id="cred-key" rows="3" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..." spellcheck="false" style="font-family:'SF Mono',Consolas,monospace;"></textarea>
+      </label>
+      <label style="flex:1 1 100%;">Authorization reference <span style="color:#f4a3a6;font-weight:400;">(required)</span>
+        <input id="cred-ref" type="text" placeholder="engagement ID, ticket, or 'my own infrastructure'" autocomplete="off">
+      </label>
+    </div>
+    <div id="cred-msg" style="font-size:12px; margin:10px 0 0; min-height:16px;"></div>
+    <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:12px;">
+      <button class="btn" id="cred-cancel" style="font-size:12px;">Cancel</button>
+      <button class="btn primary" id="cred-run" style="font-size:12px;">&#9654;&nbsp; Run audit</button>
+    </div>
+  </div>
+</div>
 
 <!-- Scope viewer: shows what's in scope.yaml on the server. Read-only. -->
 <div id="scope-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">
