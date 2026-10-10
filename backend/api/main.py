@@ -48,6 +48,7 @@ from modules.advanced_checks2_module import AdvancedChecks2Module
 from modules.mobile_android_module import AndroidStaticModule
 from modules.nuclei_module import NucleiModule
 from modules.nmap_module import NmapModule
+from modules.credentialed_module import run_audit, audit_to_findings
 from api.serializers import serialize_finding
 from api.scope_proposals import ProposalStore, verify_token
 from api.rate_limit import RateLimiter
@@ -652,6 +653,72 @@ async def _run_mobile_task(assessment_id: str, file_path: str, display_name: str
     except Exception as exc:  # noqa: BLE001
         logger.exception("mobile assessment %s failed", assessment_id)
         _STORE.set_status(assessment_id, f"error: {exc}", error=str(exc))
+
+
+# ── Credentialed (authenticated) host scanning ──────────────────────
+class CredentialedScanRequest(BaseModel):
+    host: str
+    username: str
+    password: str = ""
+    private_key: str = ""
+    port: int = 22
+    authorization_ref: str
+
+
+async def _run_credentialed_task(assessment_id: str, host: str, username: str,
+                                 password: str, key_text: str, port: int) -> None:
+    try:
+        # SSH + command execution is blocking (paramiko) — run off the loop.
+        data = await asyncio.to_thread(run_audit, host, username, password, key_text, port)
+        findings = audit_to_findings(host, data)
+        pipeline = default_pipeline(llm_client=OllamaClient(model="llama3.1:latest", timeout=25.0))
+        for f in findings:
+            if f.finding_kind != FindingKind.INFORMATIONAL:
+                f.validation = await pipeline.validate(f)
+                f.status = f.validation.status
+            _STORE.insert_finding(assessment_id, f)
+        logger.info("credentialed assessment %s: %d finding(s) on %s", assessment_id, len(findings), host)
+        _STORE.set_status(assessment_id, "complete")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("credentialed assessment %s failed: %s", assessment_id, exc)
+        _STORE.set_status(assessment_id, f"error: {exc}", error=str(exc))
+
+
+@app.post("/api/credentialed/assess", response_model=RunAssessmentResponse)
+async def credentialed_assess(
+    req: CredentialedScanRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Authenticated (credentialed) host scan over SSH — missing security
+    updates + hardening checks. Read-only. Admin-gated; the operator attests
+    authorization and supplies credentials for a host they are entitled to
+    test. Credentials are used for the connection and never logged or stored;
+    only the authorization reference is persisted."""
+    _require_admin(authorization)
+    host = (req.host or "").strip().lower().split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    if not host:
+        raise HTTPException(400, "invalid host")
+    if not (req.authorization_ref or "").strip():
+        raise HTTPException(400, "authorization_ref is required — attest authorization to test this host")
+    if not (req.username or "").strip():
+        raise HTTPException(400, "username is required")
+    if not (req.password or req.private_key):
+        raise HTTPException(400, "a password or private_key is required")
+
+    # Authorize the host at runtime (the attestation), like the universal-scope flow.
+    caller = _caller_username(request, authorization)
+    _STORE.add_authorized_target(host=host, authorization_ref=req.authorization_ref.strip(),
+                                 note="credentialed scan", added_by=caller)
+
+    assessment_id = str(uuid.uuid4())
+    _STORE.create_assessment(assessment_id=assessment_id, target=host,
+                             modules=["credentialed_scan"], llm_model="n/a")
+    asyncio.create_task(_run_credentialed_task(
+        assessment_id, host, req.username, req.password, req.private_key, req.port))
+    logger.info("credentialed scan started for %s (ref=%r, by=%s)",
+                host, req.authorization_ref.strip()[:60], caller)
+    return RunAssessmentResponse(assessment_id=assessment_id)
 
 
 @app.post("/api/mobile/assess", response_model=RunAssessmentResponse)
