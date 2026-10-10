@@ -281,28 +281,14 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
       <div class="launcher-divider"></div>
 
-      <div class="launcher-label">&#128241;&nbsp; Mobile security <span class="launcher-badge">static analysis</span></div>
-      <div class="scan-row">
-        <div class="scan-field" style="flex:1 1 420px;">
-          <label>Upload an app to inspect at rest — manifest flags (debuggable, cleartext, exported components), dangerous permissions, and hardcoded secrets.</label>
-          <div style="color:var(--text-3); font-size:11px;">Android <code class="mono">.apk</code> supported now · iOS <code class="mono">.ipa</code> coming next · non-destructive, nothing is executed</div>
+      <div class="scan-row" style="align-items:center;">
+        <div class="scan-field" style="flex:1 1 auto;">
+          <label>Other scan types <span class="opt">read-only / non-destructive · authorized targets only</span></label>
         </div>
         <div class="scan-actions">
-          <button class="btn primary" id="scan-mobile" title="Upload an Android APK for static analysis">&#128228;&nbsp; Choose APK&hellip;</button>
+          <button class="btn" id="scan-mobile" title="Upload an Android APK (or iOS IPA) for static analysis">&#128241;&nbsp; Mobile app&hellip;</button>
           <input id="mobile-file" type="file" accept=".apk,.ipa" style="display:none;">
-        </div>
-      </div>
-
-      <div class="launcher-divider"></div>
-
-      <div class="launcher-label">&#128273;&nbsp; Credentialed infra scan <span class="launcher-badge">authenticated · read-only</span></div>
-      <div class="scan-row">
-        <div class="scan-field" style="flex:1 1 420px;">
-          <label>Audit a host from the inside over SSH — missing security updates, SSH hardening, and service inventory.</label>
-          <div style="color:var(--text-3); font-size:11px;">Read-only · credentials are used for the connection and <b>never stored</b> · authorized hosts only</div>
-        </div>
-        <div class="scan-actions">
-          <button class="btn primary" id="scan-cred" title="Credentialed SSH host audit">&#128273;&nbsp; Credentialed scan&hellip;</button>
+          <button class="btn" id="scan-cred" title="Credentialed SSH host audit (missing updates, hardening)">&#128273;&nbsp; Credentialed host&hellip;</button>
         </div>
       </div>
     </div>
@@ -338,7 +324,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
   <div class="detail" id="detail-panel"></div>
 </div>
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=15"></script>
 
 <!-- Credentialed scan modal: collects SSH credentials for a read-only host audit. -->
 <div id="cred-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">
