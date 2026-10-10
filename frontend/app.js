@@ -290,6 +290,57 @@ async function getFindings(id) {
   return resp.json();
 }
 
+async function getKillchain(id) {
+  try {
+    const resp = await fetch(`${API_BASE}/api/assessments/${id}/killchain`);
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch (e) { return null; }
+}
+
+// Render the cyber kill-chain band: 7 phases, each showing its findings, with
+// reached phases accented and a MITRE ATT&CK technique list. This is the
+// offensive-security demarcation — attacker progression, not a flat list.
+async function refreshKillchain() {
+  if (!assessmentId) return;
+  const panel = $("#killchain-panel");
+  const band = $("#killchain-band");
+  const reachedEl = $("#killchain-reached");
+  const mitreEl = $("#killchain-mitre");
+  if (!panel || !band) return;
+  const s = await getKillchain(assessmentId);
+  if (!s || !s.phases) { panel.style.display = "none"; return; }
+  const worstSev = (items) => {
+    const order = ["critical","high","medium","low","info"];
+    let w = "info";
+    for (const it of items) if (!it.informational && order.indexOf(it.severity) >= 0 &&
+        order.indexOf(it.severity) < order.indexOf(w)) w = it.severity;
+    return w;
+  };
+  band.innerHTML = s.phases.map((p) => {
+    const on = p.vuln_count > 0;
+    const sev = worstSev(p.findings);
+    const items = p.findings.length
+      ? p.findings.slice(0, 8).map((it) =>
+          `<li style="${it.informational ? "color:var(--text-3);" : ""}">${escapeHtml(it.title)}</li>`).join("")
+      : `<li style="list-style:none; margin-left:-16px; color:var(--text-3); font-style:italic;">— not reached —</li>`;
+    return `
+      <div style="border:1px solid ${on ? "var(--" + sevClass(sev) + ",#c41e22)" : "var(--border)"}; border-radius:8px; padding:8px; font-size:11px; min-height:76px; ${on ? "" : "opacity:.5;"}">
+        <div style="font-weight:700;">${escapeHtml(p.label)}</div>
+        <div style="color:var(--text-3); font-size:10px; margin-bottom:4px;">${p.vuln_count} vuln · ${p.count} total</div>
+        <ul style="margin:0; padding-left:16px;">${items}</ul>
+      </div>`;
+  }).join("");
+  if (reachedEl) reachedEl.textContent = "Reached: " + ((s.reached && s.reached.join(" → ")) || "recon only");
+  if (mitreEl) {
+    mitreEl.innerHTML = (s.techniques && s.techniques.length)
+      ? "<b>MITRE ATT&CK:</b> " + s.techniques.map((t) =>
+          `<span class="mono" style="border:1px solid var(--border); border-radius:5px; padding:1px 6px; margin:2px; display:inline-block;" title="${escapeHtml(t.name)} (${escapeHtml(t.tactic)})">${escapeHtml(t.id)} ×${t.count}</span>`).join("")
+      : "";
+  }
+  panel.style.display = "";
+}
+
 async function getAttackPaths(id) {
   try {
     const resp = await fetch(`${API_BASE}/api/assessments/${id}/attack_paths`);
@@ -559,6 +610,7 @@ function startPolling() {
       renderStats();
       renderFindingsTable();
       refreshAttackPaths();   // chains appear once the run's chaining pass completes
+      refreshKillchain();
       if (selectedFindingId) {
         const f = findings.find((x) => x.finding_id === selectedFindingId);
         if (f) renderDetail(f);
@@ -803,6 +855,7 @@ async function loadAssessment(id) {
     renderStats();
     renderFindingsTable();
     refreshAttackPaths();
+    refreshKillchain();
     renderDetail(null);
     const rpt = $("#view-report"); if (rpt) rpt.disabled = false;
     setTimeout(loadPastAssessments, 500);   // refresh list after POST returns

@@ -1100,6 +1100,16 @@ async def get_attack_paths(assessment_id: str):
     return {"attack_paths": _STORE.list_attack_paths(assessment_id)}
 
 
+@app.get("/api/assessments/{assessment_id}/killchain")
+async def get_killchain(assessment_id: str):
+    """Findings grouped by cyber-kill-chain phase + aggregated MITRE ATT&CK
+    techniques (for the dashboard band). Shares the exact logic the report uses."""
+    if _STORE.get_assessment(assessment_id) is None:
+        raise HTTPException(404, "assessment not found")
+    from reporting.report_builder import killchain_summary
+    return killchain_summary(_STORE.list_findings(assessment_id))
+
+
 @app.get("/api/assessments/{assessment_id}/findings/{finding_id}/evidence/{evidence_id}")
 async def get_evidence_bytes(assessment_id: str, finding_id: str, evidence_id: str):
     """

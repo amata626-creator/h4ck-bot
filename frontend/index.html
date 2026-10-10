@@ -316,6 +316,15 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
       <div class="stat"><div class="n" id="stat-total">0</div><div class="l">Total findings<sup style="color:var(--text-3)">&dagger;</sup></div></div>
     </div>
 
+    <div class="panel" id="killchain-panel" style="display:none;">
+      <div class="panel-head">
+        <h2>Cyber kill chain <span style="font-weight:400; font-size:12px; color:var(--text-3);">&middot; attacker progression &amp; MITRE ATT&amp;CK</span></h2>
+        <div id="killchain-reached" style="font-size:12px; color:var(--text-3);"></div>
+      </div>
+      <div id="killchain-band" style="display:grid; grid-template-columns:repeat(7, 1fr); gap:6px;"></div>
+      <div id="killchain-mitre" style="margin-top:12px; font-size:12px;"></div>
+    </div>
+
     <div class="panel" id="attack-paths-panel" style="display:none; border-left:3px solid var(--crit, #c41e22);">
       <div class="panel-head">
         <h2>Attack paths <span style="font-weight:400; font-size:12px; color:var(--text-3);">&middot; AI-composed, grounded in the findings below</span></h2>
@@ -346,7 +355,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
   <div class="detail" id="detail-panel"></div>
 </div>
-  <script src="app.js?v=19"></script>
+  <script src="app.js?v=20"></script>
 
 <!-- Credentialed scan modal: collects SSH credentials for a read-only host audit. -->
 <div id="cred-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">

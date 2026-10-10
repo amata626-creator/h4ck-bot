@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from core.schema import EvidenceType, Finding, Severity
+from core.schema import EvidenceType, Finding, KillChainPhase, Severity
 from evidence.evidence_store import read_evidence_bytes
 
 
@@ -117,6 +117,7 @@ def build_report_json(data: ReportData) -> dict[str, Any]:
         "generated_at": data.generated_at,
         "scope_note": data.scope_note,
         "attack_paths": data.attack_paths,
+        "killchain": killchain_summary(data.findings),
         "methodology_note": data.methodology_note,
         "summary": {
             "total": len(data.findings),
@@ -289,6 +290,8 @@ def build_report_html(data: ReportData) -> str:
     <span><strong>Validated:</strong> {validated}</span>
   </div>
 
+  {_render_killchain(data)}
+
   {_render_attack_paths(data)}
 
   <h2>Methodology</h2>
@@ -307,6 +310,110 @@ def build_report_html(data: ReportData) -> str:
 </body>
 </html>
 """
+
+
+# The Lockheed-Martin cyber kill chain, in order, with display labels. Findings
+# carry a kill_chain_phase; we group by it so the output shows how far an
+# attacker progressed, not just a flat list. Phases with no findings read as
+# "not reached", which is itself meaningful.
+_KC_ORDER = [
+    (KillChainPhase.RECONNAISSANCE, "Reconnaissance"),
+    (KillChainPhase.WEAPONIZATION, "Weaponization"),
+    (KillChainPhase.DELIVERY, "Delivery"),
+    (KillChainPhase.EXPLOITATION, "Exploitation"),
+    (KillChainPhase.INSTALLATION, "Installation"),
+    (KillChainPhase.COMMAND_AND_CONTROL, "Command & Control"),
+    (KillChainPhase.ACTIONS_ON_OBJECTIVES, "Actions on Objectives"),
+]
+
+
+def killchain_summary(findings: list[Finding]) -> dict:
+    """Group findings by cyber-kill-chain phase and aggregate their MITRE ATT&CK
+    techniques. Pure + shared by the report and the dashboard endpoint, so both
+    tell the identical story. Informational findings count toward their phase
+    (open ports ARE reconnaissance) but are flagged so the UI can distinguish
+    them from vulnerabilities."""
+    buckets: dict = {p: [] for p, _ in _KC_ORDER}
+    techniques: dict = {}
+    for f in findings:
+        ph = f.kill_chain_phase
+        if ph in buckets:
+            buckets[ph].append({
+                "finding_id": f.finding_id,
+                "title": f.title,
+                "severity": f.severity.value,
+                "status": f.status.value,
+                "informational": f.finding_kind.value == "informational",
+            })
+        for m in (getattr(f, "mitre_techniques", None) or []):
+            e = techniques.setdefault(m.technique_id, {
+                "id": m.technique_id, "tactic": m.tactic, "name": m.name, "count": 0})
+            e["count"] += 1
+    phases = []
+    for p, label in _KC_ORDER:
+        items = buckets[p]
+        phases.append({
+            "phase": p.value, "label": label,
+            "count": len(items),
+            "vuln_count": sum(1 for i in items if not i["informational"]),
+            "findings": items,
+        })
+    techs = sorted(techniques.values(), key=lambda t: (-t["count"], t["id"]))
+    reached = [p["label"] for p in phases if p["vuln_count"] > 0]
+    return {"phases": phases, "techniques": techs, "reached": reached}
+
+
+def _render_killchain(data: "ReportData") -> str:
+    """Render the kill-chain band + MITRE ATT&CK coverage for the HTML report."""
+    summ = killchain_summary(data.findings)
+    sevrank = {s.value: i for i, s in enumerate(SEVERITY_ORDER)}
+    cols = []
+    for p in summ["phases"]:
+        reached = p["vuln_count"] > 0
+        # worst severity in this phase, for the accent
+        worst = "info"
+        for it in p["findings"]:
+            if not it["informational"] and sevrank.get(it["severity"], 99) < sevrank.get(worst, 99):
+                worst = it["severity"]
+        items = "".join(
+            f'<li class="{"info-item" if it["informational"] else ""}">{html.escape(it["title"])}</li>'
+            for it in p["findings"][:8]
+        ) or '<li class="kc-empty">— not reached —</li>'
+        cols.append(
+            f'<div class="kc-col {"kc-on" if reached else "kc-off"}">'
+            f'<div class="kc-phase">{html.escape(p["label"])}</div>'
+            f'<div class="kc-count">{p["vuln_count"]} vuln · {p["count"]} total</div>'
+            f'<ul class="kc-items sev-{html.escape(worst)}">{items}</ul></div>'
+        )
+    techs = "".join(
+        f'<tr><td class="mono">{html.escape(t["id"])}</td><td>{html.escape(t["tactic"])}</td>'
+        f'<td>{html.escape(t["name"])}</td><td>{t["count"]}</td></tr>'
+        for t in summ["techniques"]
+    )
+    tech_block = (
+        '<h3 style="margin-top:18px;">MITRE ATT&CK techniques observed</h3>'
+        '<table><tr><th>Technique</th><th>Tactic</th><th>Name</th><th>Findings</th></tr>'
+        f'{techs}</table>' if techs else ""
+    )
+    reached = ", ".join(summ["reached"]) or "none (reconnaissance only)"
+    return (
+        '<h2>Cyber kill chain</h2>'
+        '<style>'
+        '.kc-band{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin:12px 0;}'
+        '.kc-col{border:1px solid var(--border);border-radius:8px;padding:8px;font-size:11px;min-height:70px;}'
+        '.kc-col.kc-off{opacity:.45;}'
+        '.kc-col.kc-on{border-color:var(--crit);}'
+        '.kc-phase{font-weight:700;font-size:11px;margin-bottom:2px;}'
+        '.kc-count{color:var(--muted);font-size:10px;margin-bottom:4px;}'
+        '.kc-items{margin:0;padding-left:14px;}'
+        '.kc-items li{margin-bottom:2px;}'
+        '.kc-items .kc-empty{list-style:none;margin-left:-14px;color:var(--muted);font-style:italic;}'
+        '.kc-items .info-item{color:var(--muted);}'
+        '</style>'
+        f'<p style="color:var(--muted);font-size:13px;">Attacker progression reached: <b>{html.escape(reached)}</b>.</p>'
+        '<div class="kc-band">' + "".join(cols) + '</div>'
+        + tech_block
+    )
 
 
 def _render_attack_paths(data: "ReportData") -> str:
