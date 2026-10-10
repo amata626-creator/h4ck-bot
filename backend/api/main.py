@@ -24,6 +24,32 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+
+def _load_dotenv_once() -> None:
+    """Load KEY=VALUE pairs from the repo-root .env into the process environment
+    if they aren't already set. Dependency-free, and REAL environment variables
+    always win (we never overwrite an existing value), so systemd/EnvironmentFile
+    or an explicit export still takes precedence. This makes .env settings — the
+    admin token, H4CK_BOT_REASONING_MODEL, OOB base, etc. — work no matter how the
+    service is launched, instead of silently depending on the unit's wiring."""
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    try:
+        raw = env_path.read_text()
+    except (FileNotFoundError, OSError):
+        return
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+_load_dotenv_once()
+
 from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
