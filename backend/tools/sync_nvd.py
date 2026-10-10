@@ -117,6 +117,22 @@ def fetch_page(start: int, days: int | None, api_key: str | None) -> dict:
                 print(f"  rate-limited ({e.code}); waiting {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
+            if e.code == 404:
+                # NVD returns a bare 404 for an INVALID apiKey (not for a bad
+                # path — the path is fixed and correct here). Translate it so a
+                # stale/placeholder key doesn't look like an endpoint outage.
+                if api_key:
+                    raise SystemExit(
+                        "NVD returned 404. This almost always means NVD_API_KEY is "
+                        "invalid or a leftover placeholder. Fix with:\n"
+                        "    unset NVD_API_KEY        # run keyless, or\n"
+                        "    export NVD_API_KEY=<the real key from your NVD email>\n"
+                        "Request a free key at https://nvd.nist.gov/developers/request-an-api-key"
+                    )
+                raise SystemExit(
+                    "NVD returned 404 with no API key set. The endpoint is correct, so this "
+                    "is likely a transient NVD/Cloudflare issue - retry in a minute."
+                )
             raise
         except URLError as e:
             wait = 10 * (attempt + 1)
