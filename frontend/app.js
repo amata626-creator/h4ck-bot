@@ -313,6 +313,44 @@ function renderStats() {
   setText("stat-medium", counts.medium);
   setText("stat-validated", counts.validated);
   setText("stat-total", counts.total);
+  renderRail();
+}
+
+// Live sidebar rail. Every number here must be substantiated by real
+// findings/scope — no static placeholders. Driven off the same `findings`
+// array and authorized-scope list the rest of the UI uses, so it can never
+// drift from what the table and RoE actually show.
+function renderRail() {
+  let validated = 0, review = 0, fp = 0;
+  for (const f of findings) {
+    // Informational ("Recorded") findings aren't vulnerability claims, so they
+    // count toward the total but not the validated/review/FP buckets.
+    if ((f.finding_kind || "").toLowerCase() === "informational") continue;
+    const s = (f.status || "").toLowerCase();
+    if (s === "validated") validated++;
+    else if (s === "false_positive") fp++;
+    else review++;  // potential + needs_review
+  }
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = String(v); };
+  set("rail-total", findings.length);
+  set("rail-validated", validated);
+  set("rail-potential", review);
+  set("rail-fp", fp);
+  set("rail-asmt-count", findings.length);
+
+  const nameEl = document.getElementById("rail-asmt-name");
+  if (nameEl) {
+    const tgt = findings[0] && findings[0].asset && findings[0].asset.name;
+    nameEl.textContent = tgt ? tgt : (assessmentId ? "Assessment running…" : "No assessment loaded");
+  }
+
+  const list = document.getElementById("rail-scope-list");
+  if (list) {
+    const targets = window.__scope_targets || [];
+    list.innerHTML = targets.length
+      ? targets.map((h) => `<div class="asset-row"><span class="dot" style="background:#7f9ae0"></span><span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(h)}</span></div>`).join("")
+      : `<div class="asset-row" style="color:var(--text-3)">No targets authorized</div>`;
+  }
 }
 
 function renderFindingsTable() {
@@ -1098,6 +1136,8 @@ function renderScopeSummary(scope) {
 
   const roe = $("#roe-count");
   if (roe) roe.textContent = String(n);
+
+  renderRail();  // refresh the sidebar's authorized-scope list from real targets
 }
 
 function renderScopeModal(scope) {

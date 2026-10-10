@@ -203,24 +203,20 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
   <div class="rail">
     <div class="rail-label">Assessment</div>
     <div class="asset-tree">
-      <div class="asset-row selected"><span class="dot" style="background:#4FD1C5"></span>VAPTIX AI Cyber<span class="count">128</span></div>
+      <div class="asset-row selected"><span class="dot" style="background:#4FD1C5"></span><span id="rail-asmt-name">No assessment loaded</span><span class="count" id="rail-asmt-count">0</span></div>
     </div>
     <div class="rail-divider"></div>
-    <div class="rail-label">Scope</div>
-    <div class="asset-tree">
-      <div class="asset-row"><span class="dot" style="background:#7f9ae0"></span>Web applications<span class="count">42</span></div>
-      <div class="asset-row"><span class="dot" style="background:#c98edb"></span>APIs<span class="count">31</span></div>
-      <div class="asset-row"><span class="dot" style="background:#F0883E"></span>Cloud (AWS)<span class="count">19</span></div>
-      <div class="asset-row"><span class="dot" style="background:#D4A72C"></span>Identity / IAM<span class="count">12</span></div>
-      <div class="asset-row"><span class="dot" style="background:#6E7681"></span>Web3 / smart contracts<span class="count">4</span></div>
+    <div class="rail-label">Authorized scope</div>
+    <div class="asset-tree" id="rail-scope-list">
+      <div class="asset-row" style="color:var(--text-3)">No targets authorized</div>
     </div>
     <div class="rail-divider"></div>
     <div class="rail-label">Status</div>
     <div class="asset-tree">
-      <div class="asset-row selected">All findings<span class="count">128</span></div>
-      <div class="asset-row"><span class="dot" style="background:#4FD1C5"></span>Validated<span class="count">37</span></div>
-      <div class="asset-row"><span class="dot" style="background:#7C89A0"></span>Potential<span class="count">91</span></div>
-      <div class="asset-row"><span class="dot" style="background:#5E6B7D"></span>False positive<span class="count">64</span></div>
+      <div class="asset-row selected">All findings<span class="count" id="rail-total">0</span></div>
+      <div class="asset-row"><span class="dot" style="background:#4FD1C5"></span>Validated<span class="count" id="rail-validated">0</span></div>
+      <div class="asset-row"><span class="dot" style="background:#7C89A0"></span>Needs review<span class="count" id="rail-potential">0</span></div>
+      <div class="asset-row"><span class="dot" style="background:#5E6B7D"></span>False positive<span class="count" id="rail-fp">0</span></div>
     </div>
     <div class="rail-divider"></div>
     <div class="rail-label">Past assessments</div>
@@ -325,7 +321,7 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 
   <div class="detail" id="detail-panel"></div>
 </div>
-  <script src="app.js?v=16"></script>
+  <script src="app.js?v=17"></script>
 
 <!-- Credentialed scan modal: collects SSH credentials for a read-only host audit. -->
 <div id="cred-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;">
