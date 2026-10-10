@@ -31,7 +31,7 @@ from typing import AsyncIterator
 from core.module_interface import ModuleCapabilities, ModuleRunContext, ScannerModule
 from core.schema import (
     Asset, CvssScore, Evidence, EvidenceType, Finding,
-    FindingKind, KillChainPhase, VulnerabilityRef, WeaknessRef,
+    FindingKind, KillChainPhase, MitreTechnique, VulnerabilityRef, WeaknessRef,
 )
 from modules.cve_index import load_index, correlate
 
@@ -39,6 +39,55 @@ logger = logging.getLogger("h4ck-bot.nmap")
 
 _RUN_TIMEOUT_S = 300.0
 _SEV_SCORE = {"low": 3.1, "medium": 5.5, "high": 7.5, "critical": 9.5}
+
+
+# Sensitive services that are an attack surface when reachable. This is an
+# EXPOSURE check (the service is reachable and risky), NOT an exploit claim — it
+# works for ANY target, keyed on the port/service nmap already found. Each entry:
+# (label, cvss_base, cwe, mitre_id, mitre_tactic, mitre_name, why).
+_RISKY_PORTS: dict[int, tuple] = {
+    3389: ("Remote Desktop (RDP)", 7.5, "CWE-668", "T1021.001", "lateral-movement",
+            "Remote Desktop Protocol", "credential brute-force and historically wormable RCE (e.g. BlueKeep)"),
+    445:  ("SMB file sharing", 7.5, "CWE-668", "T1021.002", "lateral-movement",
+            "SMB/Windows Admin Shares", "SMB exposure (EternalBlue-class RCEs, auth attacks, share enumeration)"),
+    139:  ("NetBIOS / legacy SMB", 6.5, "CWE-668", "T1021.002", "lateral-movement",
+            "SMB/Windows Admin Shares", "legacy NetBIOS/SMB exposure"),
+    23:   ("Telnet", 7.5, "CWE-319", "T1021", "lateral-movement",
+            "Remote Services", "cleartext remote shell — credentials sniffable"),
+    21:   ("FTP", 5.3, "CWE-319", "T1071", "command-and-control",
+            "Application Layer Protocol", "often cleartext; check anonymous access"),
+    5900: ("VNC", 7.5, "CWE-668", "T1021.005", "lateral-movement",
+            "VNC", "remote desktop, frequently weak or no authentication"),
+    5901: ("VNC", 7.5, "CWE-668", "T1021.005", "lateral-movement",
+            "VNC", "remote desktop, frequently weak or no authentication"),
+    3306: ("MySQL/MariaDB database", 7.5, "CWE-668", "T1210", "lateral-movement",
+            "Exploitation of Remote Services", "database directly reachable from the network"),
+    5432: ("PostgreSQL database", 7.5, "CWE-668", "T1210", "lateral-movement",
+            "Exploitation of Remote Services", "database directly reachable from the network"),
+    1433: ("Microsoft SQL Server", 7.5, "CWE-668", "T1210", "lateral-movement",
+            "Exploitation of Remote Services", "database directly reachable from the network"),
+    1521: ("Oracle database", 7.5, "CWE-668", "T1210", "lateral-movement",
+            "Exploitation of Remote Services", "database directly reachable from the network"),
+    27017:("MongoDB", 8.1, "CWE-668", "T1210", "lateral-movement",
+            "Exploitation of Remote Services", "database directly reachable; often no auth by default"),
+    6379: ("Redis", 8.1, "CWE-668", "T1210", "lateral-movement",
+            "Exploitation of Remote Services", "often no auth by default — can lead to RCE"),
+    9200: ("Elasticsearch", 7.5, "CWE-668", "T1210", "lateral-movement",
+            "Exploitation of Remote Services", "data store reachable; often no auth"),
+    11211:("Memcached", 6.5, "CWE-668", "T1210", "lateral-movement",
+            "Exploitation of Remote Services", "data exposure and UDP amplification"),
+    2375: ("Docker API (plaintext)", 9.1, "CWE-668", "T1610", "execution",
+            "Deploy Container", "unauthenticated Docker API grants host-level RCE"),
+    161:  ("SNMP", 5.3, "CWE-668", "T1046", "discovery",
+            "Network Service Discovery", "often default community strings; info disclosure"),
+}
+# Fallback by service-name keyword, for sensitive services on non-standard ports.
+_RISKY_SVC_KEYWORDS = {
+    "ms-wbt-server": 3389, "rdp": 3389, "microsoft-ds": 445, "netbios-ssn": 139,
+    "telnet": 23, "vnc": 5900, "mysql": 3306, "mariadb": 3306, "postgresql": 5432,
+    "ms-sql": 1433, "mssql": 1433, "oracle": 1521, "mongodb": 27017, "mongod": 27017,
+    "redis": 6379, "elasticsearch": 9200, "memcached": 11211, "ftp": 21, "snmp": 161,
+}
 
 
 @dataclass
@@ -170,6 +219,12 @@ class NmapModule(ScannerModule):
             # 1. Service inventory — informational / Recorded context.
             yield self._service_finding(asset, host, si)
 
+            # 1b. Exposure: a sensitive service reachable at all is an attack
+            # surface finding (RDP, SMB, exposed DB, …) — works for any target.
+            exp = self._exposure_finding(asset, host, si)
+            if exp is not None:
+                yield exp
+
             # 2. CVE correlation per CPE (needs a concrete version).
             if not index:
                 continue
@@ -190,6 +245,64 @@ class NmapModule(ScannerModule):
                         continue
                     seen_cves.add(m.cve)
                     yield self._cve_finding(asset, host, si, cpe, m)
+
+    def _exposure_finding(self, asset: Asset, host: str, si: ServiceInfo):
+        """If this open service is a sensitive one, emit an EXPOSURE finding: it
+        is reachable and risky, independent of any CVE. Keyed on port, with a
+        service-name fallback for non-standard ports. Evidence is the observed
+        port+service, static_claim-gated so it validates as an exposure and can
+        never false-positive on a service that isn't actually there."""
+        entry = _RISKY_PORTS.get(si.port)
+        if entry is None:
+            name = (si.name or "").lower()
+            for kw, port in _RISKY_SVC_KEYWORDS.items():
+                if kw in name:
+                    entry = _RISKY_PORTS.get(port)
+                    break
+        if entry is None:
+            return None
+        label, score, cwe, mitre_id, tactic, mitre_name, why = entry
+        claim = f"{si.port}/{si.proto} {si.name or 'service'}".strip()
+        preview = (
+            f"nmap: sensitive service reachable\nhost: {host}\n"
+            f"port: {si.port}/{si.proto} ({si.state})\nservice: {si.banner()}\n"
+            f"exposure: {claim}\nwhy it matters: {why}\n"
+        )
+        f = Finding(
+            finding_id=str(uuid.uuid4()),
+            title=f"Exposed {label} on {host}:{si.port}",
+            description=(
+                f"{label} is reachable at {host}:{si.port}/{si.proto} ({si.banner()}). "
+                f"A sensitive service exposed on the network is an attack surface: {why}. "
+                "This is an EXPOSURE finding (the service is reachable), not a confirmed "
+                "exploit — restrict it to trusted networks/VPN, enforce strong auth and MFA, "
+                "and patch it. Observed non-destructively via a TCP connect + version probe."
+            ),
+            asset=asset, module_source="nmap_exposure",
+            finding_kind=FindingKind.VULNERABILITY,
+            cvss=CvssScore(base_score=float(score),
+                           vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"),
+            cwe=WeaknessRef(cwe_id=cwe, name="Exposure of Resource to Wrong Sphere"),
+            cve_refs=[],
+            mitre_techniques=[MitreTechnique(technique_id=mitre_id, tactic=tactic, name=mitre_name)],
+            # Reachable remote-access/data service = a delivery/initial-access vector.
+            kill_chain_phase=KillChainPhase.DELIVERY,
+            remediation=(
+                f"Do not expose {label} to untrusted networks. Place it behind a VPN or "
+                "allowlist, require strong authentication/MFA, and keep it patched."
+            ),
+            business_impact=f"An exposed {label} is a direct avenue for initial access or data compromise.",
+            # Directly observed open port — a single authoritative observation.
+            requires_corroboration=False,
+        )
+        f.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.RAW_OUTPUT, raw_bytes=preview.encode(),
+            storage_ref=f"mem://nmap-exposure/{f.finding_id}",
+            description=f"Exposed sensitive service {claim} on {host}",
+            metadata={"preview": preview, "source": "nmap", "static_claim": claim,
+                      "static_artifact": True},
+        ))
+        return f
 
     def _service_finding(self, asset: Asset, host: str, si: ServiceInfo) -> Finding:
         f = Finding(
