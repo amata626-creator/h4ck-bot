@@ -1091,6 +1091,15 @@ async def get_findings(assessment_id: str):
     return [serialize_finding(f) for f in _STORE.list_findings(assessment_id)]
 
 
+@app.get("/api/assessments/{assessment_id}/attack_paths")
+async def get_attack_paths(assessment_id: str):
+    """The AI-composed attack-path chains for this assessment (for the dashboard
+    panel). Same read-only auth tier as /findings."""
+    if _STORE.get_assessment(assessment_id) is None:
+        raise HTTPException(404, "assessment not found")
+    return {"attack_paths": _STORE.list_attack_paths(assessment_id)}
+
+
 @app.get("/api/assessments/{assessment_id}/findings/{finding_id}/evidence/{evidence_id}")
 async def get_evidence_bytes(assessment_id: str, finding_id: str, evidence_id: str):
     """

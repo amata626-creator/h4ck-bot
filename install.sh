@@ -122,8 +122,13 @@ if curl -fsS "$OLLAMA_URL/api/tags" >/dev/null 2>&1; then
   ok "Ollama is reachable at $OLLAMA_URL"
   if curl -fsS "$OLLAMA_URL/api/tags" | grep -q "\"$OLLAMA_MODEL"; then
     ok "model '$OLLAMA_MODEL' is available"
-    if [ -n "${H4CK_BOT_REASONING_MODEL:-}" ]; then
-      ok "AI reasoning layers use '$H4CK_BOT_REASONING_MODEL' (H4CK_BOT_REASONING_MODEL)"
+    RMODEL="${H4CK_BOT_REASONING_MODEL:-}"
+    # The service loads .env itself, so check there too (this shell doesn't).
+    if [ -z "$RMODEL" ] && [ -f .env ]; then
+      RMODEL="$(grep -E '^H4CK_BOT_REASONING_MODEL=' .env | tail -1 | cut -d= -f2-)"
+    fi
+    if [ -n "$RMODEL" ]; then
+      ok "AI reasoning layers use '$RMODEL' (H4CK_BOT_REASONING_MODEL)"
     else
       warn "AI layers (semantic/strategist/attack-paths) use the scan model. On a"
       warn "slow/CPU host an 8B model can time out; set a fast reasoning model, e.g.:"

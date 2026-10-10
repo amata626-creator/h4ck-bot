@@ -290,6 +290,44 @@ async function getFindings(id) {
   return resp.json();
 }
 
+async function getAttackPaths(id) {
+  try {
+    const resp = await fetch(`${API_BASE}/api/assessments/${id}/attack_paths`);
+    if (!resp.ok) return [];
+    return (await resp.json()).attack_paths || [];
+  } catch (e) { return []; }
+}
+
+// Fetch + render the AI-composed attack paths for the current assessment. The
+// member findings are resolved to titles from the loaded `findings`, so the
+// panel reads as a narrative over rows the user can also see below.
+async function refreshAttackPaths() {
+  if (!assessmentId) return;
+  const panel = $("#attack-paths-panel");
+  const list = $("#attack-paths-list");
+  if (!panel || !list) return;
+  const paths = await getAttackPaths(assessmentId);
+  if (!paths.length) { panel.style.display = "none"; return; }
+  const titleById = {};
+  for (const f of findings) titleById[f.finding_id] = f.title;
+  list.innerHTML = paths.map((ap) => {
+    const sev = String(ap.overall_severity || "info").toLowerCase();
+    const steps = (ap.finding_ids || [])
+      .map((fid) => `<li>${escapeHtml(titleById[fid] || fid)}</li>`).join("");
+    return `
+      <div style="border:1px solid var(--border); border-radius:8px; padding:12px 14px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+          <span class="sev-pill ${sevClass(sev)}">${escapeHtml(sev.charAt(0).toUpperCase()+sev.slice(1))}</span>
+          <span style="font-weight:600;">${escapeHtml(ap.title || "Attack path")}</span>
+        </div>
+        <div style="font-size:13px; color:var(--text-2); margin-bottom:6px;">${escapeHtml(ap.narrative || "")}</div>
+        <div style="font-size:12px; color:var(--text-3);">Chained findings:</div>
+        <ol style="margin:4px 0 0 18px; font-size:12.5px;">${steps}</ol>
+      </div>`;
+  }).join("");
+  panel.style.display = "";
+}
+
 async function getFinding(id, findingId) {
   const resp = await fetch(`${API_BASE}/api/assessments/${id}/findings/${findingId}`);
   if (!resp.ok) throw new Error(`finding ${resp.status}`);
@@ -520,6 +558,7 @@ function startPolling() {
       findings = await getFindings(assessmentId);
       renderStats();
       renderFindingsTable();
+      refreshAttackPaths();   // chains appear once the run's chaining pass completes
       if (selectedFindingId) {
         const f = findings.find((x) => x.finding_id === selectedFindingId);
         if (f) renderDetail(f);
@@ -757,11 +796,13 @@ async function loadPastAssessments() {
 
 async function loadAssessment(id) {
   try {
+    assessmentId = id;   // so evidence links + attack-paths resolve to this assessment
     const s = await getStatus(id);
     updateRunBadge(s.status === "complete" ? "complete" : (s.status === "running" ? "running" : "error"), s.finding_count);
     findings = await getFindings(id);
     renderStats();
     renderFindingsTable();
+    refreshAttackPaths();
     renderDetail(null);
     const rpt = $("#view-report"); if (rpt) rpt.disabled = false;
     setTimeout(loadPastAssessments, 500);   // refresh list after POST returns
