@@ -168,6 +168,17 @@ else
   warn "Install it to enable service/version + CVE correlation:  sudo apt install nmap"
 fi
 
+# ── 11. OOB listener (blind-SSRF out-of-band detection) ────────────
+say "Checking OOB listener config (blind SSRF detection, optional)"
+if grep -q '^H4CK_BOT_OOB_BASE=' .env 2>/dev/null; then
+  ok "OOB callback base configured ($(grep '^H4CK_BOT_OOB_BASE=' .env | cut -d= -f2-))"
+else
+  warn "H4CK_BOT_OOB_BASE not set — blind/out-of-band SSRF detection will be skipped."
+  warn "Set it to a URL the TARGET can reach back on (your platform's PUBLIC address):"
+  warn "    echo 'H4CK_BOT_OOB_BASE=http://scan.vaptix.com' >> .env   # then restart"
+  warn "  The /oob/ path must be reachable externally WITHOUT auth (no nginx basic-auth on it)."
+fi
+
 # ── Done ───────────────────────────────────────────────────────────
 cat <<EOF
 

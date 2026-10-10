@@ -74,6 +74,18 @@ class ExecContext:
     max_probes: int = 5
     pace_seconds: float = 0.3
     base_url: str = ""             # e.g. "https://host"
+    oob_base_url: str = ""         # public callback base for OOB detection (SSRF)
+
+
+# Parameter names that commonly carry a URL/host the server fetches — the
+# candidates for SSRF. Used by the SSRF hypothesis and the OOB executor.
+URL_PARAM_HINTS = {
+    "url", "uri", "link", "next", "redirect", "redirect_url", "redirecturl",
+    "dest", "destination", "continue", "return", "returnurl", "return_url",
+    "callback", "webhook", "image", "imageurl", "img", "src", "source", "feed",
+    "host", "domain", "site", "page", "path", "file", "fileurl", "load",
+    "fetch", "proxy", "open", "to", "out", "view", "data", "u", "q", "target",
+}
 
 
 def _fill_id(path_template: str, oid: str) -> str:
@@ -461,6 +473,114 @@ class InjectionProbeExecutor:
         return finding
 
 
+class SsrfOobExecutor:
+    """Out-of-band SSRF confirmation (CWE-918).
+
+    For each URL-like parameter, inject a UNIQUE, INERT callback URL pointing at
+    our own listener (e.g. http://scan.vaptix.com/oob/<token>) and make the
+    request. If the target's back end fetches that URL, our listener records an
+    interaction tagged with the token — direct proof the server made a
+    server-side request to an attacker-supplied destination (the SSRF
+    condition), even though the HTTP response gave nothing away. This is the
+    canonical non-destructive SSRF test: a benign URL in a parameter, GET-only,
+    no exploit payload. The callback itself is the proof, so a confirmed finding
+    is VALIDATED, not inferred.
+
+    Two independent evidence TYPES are attached — the probe transaction (we
+    injected the callback) and the OOB interaction record (the server called
+    back) — so evidence-correlation is satisfied honestly. Skips cleanly when no
+    public callback base is configured (H4CK_BOT_OOB_BASE)."""
+
+    handles = {HypothesisKind.SSRF}
+
+    async def execute(self, hyp: Hypothesis, ctx: "ExecContext") -> list[Finding]:
+        if not ctx.roe.target_authorized(ctx.target_host):
+            logger.warning("ssrf: %s not authorized by RoE - skipping", ctx.target_host)
+            return []
+        if not ctx.oob_base_url:
+            logger.info("ssrf: no OOB callback base (H4CK_BOT_OOB_BASE) configured - skipping OOB detection")
+            return []
+
+        from oob.listener import store, callback_url
+        st = store()
+        base = ctx.base_url or f"https://{ctx.target_host}"
+        findings: list[Finding] = []
+        probed = 0
+        for path in hyp.target_endpoints:
+            # prefer URL-like params, fall back to all params the hypothesis named
+            params = [p for p in hyp.target_params if p.lower() in URL_PARAM_HINTS] or list(hyp.target_params)
+            for param in params:
+                if probed >= ctx.max_probes:
+                    break
+                token = st.new_token()
+                cb = callback_url(token, ctx.oob_base_url)
+                probe_url = _with_param(base, path, param, cb)
+                try:
+                    probe = await ctx.fetch(probe_url)
+                except Exception as e:  # noqa: BLE001
+                    logger.info("ssrf: fetch failed %s: %s", probe_url, e)
+                    continue
+                probed += 1
+                # Wait for an out-of-band callback (back-end fetch can lag).
+                interactions = []
+                for _ in range(4):
+                    await asyncio.sleep(1.5)
+                    interactions = st.poll(token)
+                    if interactions:
+                        break
+                if interactions:
+                    findings.append(self._finding(path, param, cb, probe, interactions, ctx))
+        return findings
+
+    def _finding(self, path, param, cb, probe, interactions, ctx) -> Finding:
+        asset = Asset(asset_id="a0", name=ctx.target_host, asset_type="web",
+                      scope_approved=True, metadata={"exposure": "internet"})
+        finding = Finding(
+            finding_id=str(uuid.uuid4()),
+            title=f"Server-Side Request Forgery (SSRF) via '{param}' on {path}",
+            description=(
+                f"Parameter '{param}' on {path} caused the server to make an outbound request to an "
+                f"attacker-supplied URL. A unique inert callback ({cb}) was injected, and the target's "
+                f"back end fetched it — recorded out-of-band by our listener ({len(interactions)} "
+                "interaction(s)). This is the SSRF condition, confirmed directly by the callback. "
+                "Non-destructive: only a benign URL was supplied; no exploit payload was used."
+            ),
+            asset=asset,
+            module_source="ssrf_oob_executor",
+            finding_kind=FindingKind.VULNERABILITY,
+            cvss=CvssScore(base_score=7.5,
+                           vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+            cwe=WeaknessRef(cwe_id="CWE-918", name="Server-Side Request Forgery (SSRF)"),
+            mitre_techniques=[MitreTechnique(technique_id="T1190", tactic="initial-access",
+                                             name="Exploit Public-Facing Application")],
+            kill_chain_phase=KillChainPhase.EXPLOITATION,
+            remediation=(
+                "Do not fetch user-supplied URLs server-side. If unavoidable, enforce a strict "
+                "allowlist of hosts/schemes, block internal/link-local ranges, and disable redirects."
+            ),
+            business_impact="SSRF can reach internal services and cloud metadata, leading to data exposure or pivoting.",
+            requires_corroboration=True,
+        )
+        tx = (f"GET {probe.url}\nstatus: {probe.status}\n"
+              f"injected callback into '{param}': {cb}")
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.HTTP_TRANSACTION, raw_bytes=tx.encode(),
+            storage_ref=f"mem://ssrf/{finding.finding_id}",
+            description=f"SSRF probe injecting an OOB callback on {path}?{param}",
+            metadata={"preview": tx},
+        ))
+        oob_text = ("Out-of-band callback received — proof the server fetched the injected URL:\n\n"
+                    + "\n\n".join(i.summary() for i in interactions[:5]))
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.RAW_OUTPUT, raw_bytes=oob_text.encode(),
+            storage_ref=f"mem://ssrf-oob/{finding.finding_id}",
+            description="Out-of-band interaction(s) recorded by the listener",
+            metadata={"preview": oob_text, "source": "oob_listener"},
+        ))
+        logger.info("ssrf: CONFIRMED on %s?%s (%d OOB interaction(s))", path, param, len(interactions))
+        return finding
+
+
 class ExecutorRegistry:
     """Maps a hypothesis to the executor that can safely check it. Each executor
     is non-destructive (GET-only, inert probes), scope-gated against the RoE, and
@@ -473,6 +593,7 @@ class ExecutorRegistry:
             BolaExecutor(),
             XssReflectionExecutor(),
             InjectionProbeExecutor(),
+            SsrfOobExecutor(),
         ]
 
     def for_hypothesis(self, hyp: Hypothesis) -> Optional[Executor]:

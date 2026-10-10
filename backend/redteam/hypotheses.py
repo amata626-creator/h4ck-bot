@@ -141,6 +141,34 @@ class HypothesisGenerator:
                 requires_active_testing=True,
             ))
 
+        # ── 3b. SSRF on endpoints whose params carry a URL/host ──────────
+        from redteam.executors import URL_PARAM_HINTS
+        for ep in recon.endpoints:
+            url_params = [p for p in (ep.params or []) if p.lower() in URL_PARAM_HINTS]
+            if not url_params:
+                continue
+            out.append(Hypothesis(
+                hypothesis_id=new_id(),
+                kind=HypothesisKind.SSRF,
+                title=f"SSRF candidate via {url_params[:3]} on {ep.path}",
+                target_endpoints=[ep.path],
+                target_params=url_params,
+                rationale=(
+                    f"{ep.path} takes URL-like parameter(s) {url_params[:3]} that the server may fetch. "
+                    "An inert, unique callback URL to our listener would, if fetched, confirm SSRF "
+                    "out-of-band. No exploit payload is used — only a benign URL."
+                ),
+                evidence_refs=[f"recon.endpoint:{ep.signature}"],
+                cwe=WeaknessRef(cwe_id="CWE-918", name="Server-Side Request Forgery (SSRF)"),
+                mitre=MitreTechnique(technique_id="T1190", tactic="initial-access",
+                                     name="Exploit Public-Facing Application"),
+                kill_chain_phase=KillChainPhase.EXPLOITATION,
+                estimated_severity=Severity.HIGH,
+                prior_confidence=0.3,
+                suggested_technique=Technique.API_TESTING,
+                requires_active_testing=True,
+            ))
+
         # ── 4. Broken authentication around the login surface ────────────
         if recon.auth.login_paths:
             login = ground(recon.auth.login_paths) or recon.auth.login_paths[:2]

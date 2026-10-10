@@ -113,7 +113,9 @@ async def auth_gate(request: Request, call_next):
     to /login; API clients get 401. The gate is a no-op until login is
     configured, so a fresh deploy is never locked out before a password is set."""
     path = request.url.path
-    if path in _AUTH_PUBLIC_PATHS or not _login_enabled():
+    # /oob/<token> is the out-of-band listener: external back ends must be able
+    # to hit it unauthenticated, otherwise we could never detect blind SSRF.
+    if path in _AUTH_PUBLIC_PATHS or path.startswith("/oob/") or not _login_enabled():
         return await call_next(request)
 
     # 1. valid session cookie?
@@ -1068,15 +1070,35 @@ def _make_live_fetch(auth: dict | None = None):
 def _make_exec_factory(semantic, roe, base_url: str, auth: dict | None = None):
     host = roe.authorized_targets[0] if roe.authorized_targets else ""
     fetch = _make_live_fetch(auth)
+    from oob.listener import oob_base_url
+    oob_base = oob_base_url()
 
     def factory(hyp):
         return ExecContext(
             target_host=host, roe=roe, fetch=fetch,
             candidate_ids=["1", "2", "3"],
             owner_field=_owner_field_for(semantic, hyp.target_endpoints),
-            base_url=base_url,
+            base_url=base_url, oob_base_url=oob_base,
         )
     return factory
+
+
+@app.api_route("/oob/{token}", methods=["GET", "POST", "HEAD", "PUT"])
+async def oob_callback(token: str, request: Request):
+    """Out-of-band listener endpoint. Records any inbound hit carrying a token,
+    so a blind SSRF (the target's back end fetching our injected callback URL)
+    is detected. Unauthenticated by design — external back ends must reach it."""
+    from fastapi.responses import Response
+    from oob.listener import store
+    ip = request.client.host if request.client else "unknown"
+    store().record(
+        token=token, source_ip=ip, method=request.method,
+        path=str(request.url.path),
+        user_agent=request.headers.get("user-agent", ""),
+        host=request.headers.get("host", ""),
+    )
+    logger.info("oob: interaction recorded for token %s from %s", token[:10], ip)
+    return Response(content=b"ok", media_type="text/plain")
 
 
 @app.post("/api/redteam/assess", response_model=RunAssessmentResponse)
