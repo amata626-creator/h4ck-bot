@@ -96,6 +96,27 @@ URL_PARAM_HINTS = {
 }
 
 
+def _looks_instance_scoped(template: str) -> bool:
+    """True only if the endpoint addresses a specific OBJECT INSTANCE — an id
+    placeholder (/x/{id}, /x/:id), a trailing numeric segment (/x/123), or a
+    query parameter that names an object id. BOLA/IDOR is meaningless on a
+    non-object endpoint like '/' or '/search', so we must not probe those:
+    appending /1,/2,/3 to such a path just hits unrelated routes and the
+    'distinct bodies' heuristic would cry wolf (a classic false positive)."""
+    import re as _re
+    from urllib.parse import urlsplit, parse_qs
+    t = template or ""
+    if "{" in t or "/:" in t:
+        return True
+    if _re.search(r"/\d+/?$", t):
+        return True
+    q = parse_qs(urlsplit(t).query)
+    id_like = {"id", "uid", "user", "user_id", "userid", "account", "account_id",
+               "order", "order_id", "invoice", "invoice_id", "doc", "doc_id",
+               "file", "file_id", "object", "object_id", "key", "ref", "num", "no"}
+    return any(k.lower() in id_like for k in q)
+
+
 def _fill_id(path_template: str, oid: str) -> str:
     """Substitute an object id into an endpoint template: /x/{id} or /x/:id."""
     import re
@@ -154,6 +175,12 @@ class BolaExecutor:
         base = ctx.base_url or f"https://{ctx.target_host}"
 
         for template in hyp.target_endpoints:
+            # BOLA/IDOR only makes sense on an object-instance endpoint. Skip
+            # non-object paths ('/', '/search', ...) so we never file a spurious
+            # "IDOR on /" from unrelated routes differing - a false positive.
+            if not _looks_instance_scoped(template):
+                logger.info("bola: skipping %s - not an object-instance endpoint", template)
+                continue
             probes: list[FetchResult] = []
             for oid in ctx.candidate_ids[: ctx.max_probes]:
                 url = base.rstrip("/") + _fill_id(template, oid)
