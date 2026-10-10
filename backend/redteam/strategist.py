@@ -96,7 +96,9 @@ class LlmStrategist:
         try:
             raw = await self._chat(_SYSTEM, user)
         except Exception as exc:  # noqa: BLE001 - best-effort; loop ends on failure
-            logger.info("strategist LLM call failed round %d: %s", ctx.round_index, exc)
+            logger.info("strategist LLM call failed round %d [model=%s, timeout=%ss]: %s: %s",
+                        ctx.round_index, self.model, self.timeout,
+                        type(exc).__name__, exc or "(no message - likely a timeout)")
             return []
         return self._parse(raw, paths, params)
 

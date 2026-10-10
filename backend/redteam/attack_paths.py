@@ -68,7 +68,9 @@ class AttackPathChainer:
         try:
             raw = await self._chat(_SYSTEM, self._prompt(eligible))
         except Exception as exc:  # noqa: BLE001 - best-effort
-            logger.info("attack-path chaining LLM call failed: %s", exc)
+            logger.info("attack-path chaining LLM call failed [model=%s, timeout=%ss]: %s: %s",
+                        self.model, self.timeout, type(exc).__name__,
+                        exc or "(no message - likely a timeout)")
             return []
         return self._parse(raw, eligible)
 
