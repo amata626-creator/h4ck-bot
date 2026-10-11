@@ -188,6 +188,29 @@ class ReconModule(ScannerModule):
             except Exception as exc:  # noqa: BLE001 - AI fuzzing is best-effort
                 logger.info("recon %s: AI fuzzing skipped (%s)", target, exc)
 
+            # 3c. Deep (rendered) crawl: a real-browser pass that renders each
+            # page, captures every XHR/fetch the app makes during load, and mines
+            # robots.txt / sitemap.xml / OpenAPI specs / JS bundles. Its biggest
+            # value to the AI loop is the API calls (with their query params) that
+            # a static crawl never sees - and the strategist + self-authored
+            # probes are grounded to exactly this observed surface, so each new
+            # endpoint/param deep_crawl finds widens what the AI can test. Carries
+            # the auth session and the reasoning model; best-effort, never fatal.
+            try:
+                from modules.deep_crawler import discover_endpoints as _deep_discover
+                deep_urls = await _deep_discover(primary, max_pages=25, extra_headers=_headers)
+                added = 0
+                for u in deep_urls:
+                    ep = _url_to_endpoint(u, primary)
+                    if ep is not None:
+                        before = len(result.endpoints)
+                        result.add_endpoint(ep)
+                        added += int(len(result.endpoints) != before or bool(ep.params))
+                logger.info("recon %s: deep crawl observed %d URL(s), merged into surface",
+                            target, len(deep_urls))
+            except Exception as exc:  # noqa: BLE001 - deep crawl is best-effort
+                logger.info("recon %s: deep crawl skipped (%s)", target, exc)
+
             # 4. Note what we couldn't determine
             if not result.endpoints:
                 result.unknowns.append("no endpoints discovered; site may be JS-rendered or require auth")
@@ -210,6 +233,32 @@ class ReconModule(ScannerModule):
 def _now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+def _url_to_endpoint(url: str, base: str) -> Optional[Endpoint]:
+    """Convert a deep-crawl URL into a same-origin Endpoint, lifting its query
+    parameter NAMES (not values) into Endpoint.params so the input-level
+    executors (injection/XSS/SSTI/open-redirect) and AI probes have real,
+    observed parameters to test. Returns None for off-origin or junk URLs."""
+    from urllib.parse import urlsplit, parse_qsl
+    try:
+        pu, bu = urlsplit(url), urlsplit(base)
+    except Exception:  # noqa: BLE001
+        return None
+    if pu.scheme not in ("http", "https"):
+        return None
+    # same-origin only (host match, ignoring a leading www.)
+    def _h(n: str) -> str:
+        return (n or "").lower().split(":", 1)[0].removeprefix("www.")
+    if pu.netloc and _h(pu.netloc) != _h(bu.netloc):
+        return None
+    path = pu.path or "/"
+    params = [k for k, _ in parse_qsl(pu.query, keep_blank_values=True)]
+    # de-dup param names, preserve order
+    seen: set[str] = set()
+    params = [p for p in params if not (p in seen or seen.add(p))]
+    return Endpoint(path=path, methods=["GET"], discovered_from="deep-crawler",
+                    params=params, notes="deep-crawl (rendered + XHR/spec capture)")
 
 
 def _select_traces(traces: list, limit: int) -> list:

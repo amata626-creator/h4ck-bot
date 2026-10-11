@@ -30,6 +30,7 @@ so that already-verified crawler is not touched or put at risk by this.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -39,6 +40,18 @@ from modules.owasp_top10_module import _normalize_netloc, STATIC_EXTENSIONS
 from evidence.llm_client import OllamaClient
 
 logger = logging.getLogger("h4ck-bot.deep_crawler")
+
+
+def _resolve_model(model: str | None) -> str:
+    """The model for AI-assisted JS endpoint extraction. Honors the engine's
+    reasoning-model override (H4CK_BOT_REASONING_MODEL) so a CPU host can run a
+    fast model here instead of timing out on an 8B one — the same decoupling the
+    rest of the AI layers use. Never defaults to OllamaClient's own 'mistral:7b'
+    (not installed on this server, silently 404s)."""
+    return (model
+            or os.environ.get("H4CK_BOT_REASONING_MODEL", "").strip()
+            or os.environ.get("H4CK_BOT_LLM_MODEL", "").strip()
+            or "qwen2.5:3b")
 
 JS_ENDPOINT_REGEX = re.compile(r"""["'`](/(?:api|graphql|v[0-9]+)/[a-zA-Z0-9_\-/{}:.]+)["'`]""")
 MAX_JS_FILES_FOR_AI = 6  # cap AI-assisted extraction calls per crawl to keep scan time reasonable
@@ -53,16 +66,25 @@ OPENAPI_SPEC_PATHS = [
 ]
 
 
-async def discover_endpoints(base_url: str, max_pages: int = 40) -> list[str]:
+async def discover_endpoints(base_url: str, max_pages: int = 40,
+                             extra_headers: dict | None = None,
+                             model: str | None = None) -> list[str]:
+    """Deep (rendered) endpoint discovery. `extra_headers`, when supplied,
+    carries an authenticated session (a Cookie header and/or a bearer token) on
+    BOTH the httpx fetches and the browser navigations, so an authenticated
+    assessment crawls behind the login. GET-equivalent navigation only; never
+    submits a form or clicks a destructive action."""
     from playwright.async_api import async_playwright
 
+    extra_headers = {str(k): str(v) for k, v in (extra_headers or {}).items()}
     base_host = _normalize_netloc(urlparse(base_url).netloc)
     visited: set[str] = set()
     endpoints: set[str] = set()
     to_visit: list[str] = [base_url]
 
     # -- robots.txt / sitemap.xml / OpenAPI specs: cheap, no browser needed --
-    async with httpx.AsyncClient(verify=False, timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+    async with httpx.AsyncClient(verify=False, timeout=FETCH_TIMEOUT, follow_redirects=True,
+                                 headers=(extra_headers or None)) as client:
         try:
             robots = await client.get(urljoin(base_url, "/robots.txt"))
             if robots.status_code == 200:
@@ -120,7 +142,10 @@ async def discover_endpoints(base_url: str, max_pages: int = 40) -> list[str]:
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = await browser.new_context(ignore_https_errors=True)
+            context = await browser.new_context(
+                ignore_https_errors=True,
+                extra_http_headers=(extra_headers or None),   # carry the auth session into the browser
+            )
 
             async def on_request(request):
                 url = request.url
@@ -203,13 +228,12 @@ async def discover_endpoints(base_url: str, max_pages: int = 40) -> list[str]:
             if js_bundles:
                 logger.info(f"deep_crawler: {base_url} - {len(js_bundles)} JS bundle(s) captured, "
                            f"running AI-assisted endpoint extraction on up to {MAX_JS_FILES_FOR_AI}")
-                # Matches api/main.py's own default llm_model ("llama3.1") -
-                # OllamaClient()'s own class default ("mistral:7b") is never
-                # installed on this server and was silently 404ing every call,
-                # with every failure swallowed by extract_endpoints_from_js's
-                # try/except and reported as "0 endpoints" indistinguishably
-                # from a genuine negative result.
-                ollama = OllamaClient(model="llama3.1")
+                # Uses the engine's reasoning model (H4CK_BOT_REASONING_MODEL,
+                # e.g. qwen2.5:3b) via _resolve_model, not a hardcoded 8B model
+                # that times out on CPU hosts and not OllamaClient's own
+                # 'mistral:7b' default (never installed here, silently 404s and
+                # was swallowed as "0 endpoints").
+                ollama = OllamaClient(model=_resolve_model(model))
                 ai_endpoint_total = 0
                 # Prioritize bundles the regex pass already proved contain
                 # endpoint-like strings - a webpack runtime/manifest bundle
