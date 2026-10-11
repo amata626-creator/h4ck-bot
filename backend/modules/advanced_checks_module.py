@@ -59,9 +59,23 @@ SECRET_PATTERNS = {
 
 
 async def _discover_urls(base_url: str) -> list[str]:
-    """Same-origin page discovery, links only (no form extraction needed
-    for these checks) - reuses _PageParser from owasp_top10_module so
-    both modules share one crawler implementation."""
+    """Same-origin endpoint discovery. Tries modules.deep_crawler first
+    (a Playwright-based crawler that renders pages with a real browser,
+    catching JS/SPA-hydrated links a static HTML parser would miss,
+    plus XHR/fetch API calls made during page load, robots.txt/
+    sitemap.xml, OpenAPI/Swagger specs, and AI-assisted extraction of
+    templated endpoints from JS bundles). Falls back to the original
+    httpx+html.parser crawl below if deep_crawler is unavailable or
+    errors out, so this never becomes a hard dependency."""
+    try:
+        from modules.deep_crawler import discover_endpoints
+        urls = await discover_endpoints(base_url, max_pages=MAX_CRAWL_PAGES)
+        logger.info(f"advanced_checks crawl: {base_url} -> discovered {len(urls)} URL(s) via deep_crawler")
+        return urls
+    except Exception as e:
+        logger.info(f"advanced_checks crawl: deep_crawler failed for {base_url} "
+                   f"({type(e).__name__}: {e}) - falling back to static HTML crawl")
+
     visited: set[str] = set()
     to_visit = [base_url]
     base_host = _normalize_netloc(__import__("urllib.parse", fromlist=["urlparse"]).urlparse(base_url).netloc)
