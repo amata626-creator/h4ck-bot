@@ -169,6 +169,25 @@ class ReconModule(ScannerModule):
             result.tech = fingerprint(result.http_traces)
             result.auth = infer_auth_hints(result.http_traces)
 
+            # 3b. AI-powered fuzzing: ask the LLM for context-aware candidate
+            # paths for THIS tech stack, probe them (GET, carries auth), and add
+            # only those that actually respond - expanding the surface the
+            # strategist + executors then test. Best-effort; never fatal.
+            try:
+                from recon.ai_fuzzer import discover as ai_discover
+                tech_summary = " ".join(x for x in (
+                    result.tech.server, result.tech.powered_by, result.tech.framework,
+                    result.tech.language, result.tech.cms,
+                    " ".join(result.tech.detected_products or [])) if x).strip()
+                known = [e.path for e in result.endpoints]
+                fuzzed = await ai_discover(client, primary, tech_summary, known, log=logger.info)
+                for ep in fuzzed:
+                    result.add_endpoint(ep)
+                if fuzzed:
+                    logger.info("recon %s: AI fuzzing added %d endpoint(s)", target, len(fuzzed))
+            except Exception as exc:  # noqa: BLE001 - AI fuzzing is best-effort
+                logger.info("recon %s: AI fuzzing skipped (%s)", target, exc)
+
             # 4. Note what we couldn't determine
             if not result.endpoints:
                 result.unknowns.append("no endpoints discovered; site may be JS-rendered or require auth")
