@@ -42,6 +42,7 @@ class HypothesisKind(str, Enum):
     XXE = "xml_external_entity"                       # CWE-611
     SSTI = "server_side_template_injection"          # CWE-1336
     OPEN_REDIRECT = "open_redirect"                   # CWE-601
+    AI_PROBE = "ai_authored_probe"                    # AI synthesizes its own safe check
     SECURITY_MISCONFIG = "security_misconfiguration"  # CWE-16
 
 
@@ -91,6 +92,15 @@ class Hypothesis:
     destructive: bool = False
 
     source: str = "deterministic"          # "deterministic" | "llm"
+
+    # AI-authored probe: when the AI has no dedicated executor for this
+    # hypothesis, it synthesizes its own check here — a bounded, GET-only,
+    # non-destructive request + a response matcher. This spec is NEVER trusted
+    # as-written: GenericProbeExecutor re-validates it (GET-only, grounded to
+    # observed surface, non-destructive payload, bounded) before it runs, and
+    # the result is evidence-gated through the normal validation pipeline.
+    # Empty for every hypothesis that maps to a hand-written executor.
+    probe_spec: dict = field(default_factory=dict)
 
     def priority(self) -> float:
         """Ranking score: plausibility weighted by impact. Higher runs first."""

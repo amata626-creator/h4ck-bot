@@ -8,6 +8,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+# "active_testing" is an UMBRELLA authorization token: it grants the family of
+# non-destructive, active web/API techniques below. The universal one-click
+# authorization grants "active_testing" (the operator attests they may actively
+# test the target), so without this umbrella every specific active technique
+# (injection_testing, xss_testing, ...) would be skipped despite that explicit
+# grant. Destructive actions are NOT in this family — they are gated separately
+# by destructive_actions_allowed and always require human approval.
+ACTIVE_TESTING_FAMILY = frozenset({
+    "authz_testing", "auth_testing", "injection_testing", "xss_testing", "api_testing",
+})
+
 
 @dataclass
 class RulesOfEngagement:
@@ -29,8 +40,14 @@ class RulesOfEngagement:
 
     def permits(self, technique: str) -> bool:
         if technique in self.restricted_techniques:
-            return False
-        return technique in self.permitted_techniques
+            return False          # an explicit restriction always wins
+        if technique in self.permitted_techniques:
+            return True
+        # Umbrella: granting "active_testing" authorizes the non-destructive
+        # active technique family (how universal authorization is expressed).
+        if "active_testing" in self.permitted_techniques and technique in ACTIVE_TESTING_FAMILY:
+            return True
+        return False
 
     def target_authorized(self, target: str) -> bool:
         return any(target == t or target.endswith(f".{t}") for t in self.authorized_targets)

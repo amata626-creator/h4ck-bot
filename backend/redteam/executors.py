@@ -1127,6 +1127,9 @@ class ExecutorRegistry:
     reports honest coverage instead of a fabricated result."""
 
     def __init__(self):
+        # Import here to avoid a circular import (synth_probe imports from this
+        # module's ExecContext/helpers).
+        from redteam.synth_probe import GenericProbeExecutor
         self._executors: list[Executor] = [
             BolaExecutor(),
             XssReflectionExecutor(),
@@ -1135,6 +1138,7 @@ class ExecutorRegistry:
             XxeOobExecutor(),
             SstiExecutor(),
             OpenRedirectExecutor(),
+            GenericProbeExecutor(),   # AI writes its own check (validated + evidence-gated)
         ]
 
     def for_hypothesis(self, hyp: Hypothesis) -> Optional[Executor]:

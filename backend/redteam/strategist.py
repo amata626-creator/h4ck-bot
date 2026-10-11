@@ -50,6 +50,12 @@ _KIND_BY_NAME = {
     "open_redirect": HypothesisKind.OPEN_REDIRECT,
     "open-redirect": HypothesisKind.OPEN_REDIRECT,
     "redirect": HypothesisKind.OPEN_REDIRECT,
+    # AI writes its own check: when no dedicated kind fits, the model authors a
+    # bounded, non-destructive probe (validated before it runs — see synth_probe).
+    "ai_probe": HypothesisKind.AI_PROBE,
+    "probe": HypothesisKind.AI_PROBE,
+    "custom": HypothesisKind.AI_PROBE,
+    "custom_probe": HypothesisKind.AI_PROBE,
 }
 _TECH_BY_KIND = {
     HypothesisKind.BOLA: Technique.AUTHZ_TESTING,
@@ -60,6 +66,7 @@ _TECH_BY_KIND = {
     HypothesisKind.XXE: Technique.API_TESTING,
     HypothesisKind.SSTI: Technique.INJECTION_TESTING,
     HypothesisKind.OPEN_REDIRECT: Technique.API_TESTING,
+    HypothesisKind.AI_PROBE: Technique.API_TESTING,
 }
 
 _SYSTEM = (
@@ -69,14 +76,28 @@ _SYSTEM = (
     "attack surface imply. Hard rules you must obey:\n"
     "1. You may ONLY name endpoints and parameters that appear in the OBSERVED "
     "SURFACE provided. Never invent a path or a parameter.\n"
-    "2. You may only choose a check 'kind' from: bola, idor, injection, xss, "
+    "2. For a standard check, choose 'kind' from: bola, idor, injection, xss, "
     "ssrf, xxe, ssti, open_redirect.\n"
-    "3. Do not repeat anything in ALREADY TRIED.\n"
-    "4. Prefer pivots justified by a confirmed finding (same bug class on a "
+    "3. When you suspect a weakness NONE of those standard kinds covers, you may "
+    "AUTHOR YOUR OWN CHECK with kind 'ai_probe'. You then supply a 'probe' object "
+    "describing a SINGLE, bounded, NON-DESTRUCTIVE GET request and how to read the "
+    "response:\n"
+    '   \"probe\": {\"payload\": \"<inert value to put in the param>\", '
+    '\"matcher\": {\"type\": \"reflection|error_signature|status_change|time_delay\", '
+    '\"needle\": \"<expected string, for reflection/error_signature>\", '
+    '\"min_delay_s\": <2-6, for time_delay>}, \"cwe\": \"CWE-XX\", '
+    '\"severity\": \"low|medium|high\", \"title\": \"<short>\"}\n'
+    "   The payload MUST be inert: NO SQL write verbs (drop/delete/insert/update), "
+    "NO stacked queries or ';', NO shell metacharacters ($ ` | & ), NO path "
+    "traversal '../', NO file://gopher://etc schemes, NO internal/metadata hosts "
+    "(127.0.0.1, localhost, 169.254.169.254), NO <script>. The check is a DETECTOR, "
+    "not an exploit. Any probe that breaks these is rejected before it runs.\n"
+    "4. Do not repeat anything in ALREADY TRIED.\n"
+    "5. Prefer pivots justified by a confirmed finding (same bug class on a "
     "sibling endpoint; chaining two findings).\n"
     "Respond with STRICT JSON only: "
     '{\"next\": [{\"kind\": \"...\", \"endpoint\": \"/path\", \"param\": \"name_or_empty\", '
-    '\"why\": \"one sentence grounded in the evidence\"}]}'
+    '\"why\": \"one sentence grounded in the evidence\", \"probe\": {...only for ai_probe...}}]}'
 )
 
 
@@ -136,10 +157,24 @@ class LlmStrategist:
             if kind is None or endpoint not in paths:
                 continue  # unknown kind or invented endpoint -> reject here too
             tparams = [param] if (param and param in params) else []
+
+            probe_spec: dict = {}
+            if kind is HypothesisKind.AI_PROBE:
+                # AI-authored check: build the spec, grounded to this endpoint/param.
+                # The spec is NOT trusted here — synth_probe.validate_probe_spec
+                # re-checks GET-only / grounding / non-destructive / bounds before
+                # it ever runs. We just assemble what the model proposed.
+                probe_spec = self._build_probe_spec(it.get("probe"), endpoint, param, tparams)
+                if probe_spec is None:
+                    logger.info("strategist: dropping ai_probe on %s - no usable probe spec", endpoint)
+                    continue
+
+            title = (f"AI-authored probe on {endpoint}" if kind is HypothesisKind.AI_PROBE
+                     else f"{kind.value} on {endpoint}") + (f" via '{param}'" if tparams else "")
             out.append(Hypothesis(
                 hypothesis_id=f"llm-{uuid.uuid4().hex[:8]}",
                 kind=kind,
-                title=f"{kind.value} on {endpoint}" + (f" via '{param}'" if tparams else ""),
+                title=title,
                 target_endpoints=[endpoint],
                 target_params=tparams,
                 rationale=str(it.get("why", ""))[:300] or "AI strategist pivot from confirmed surface",
@@ -150,9 +185,33 @@ class LlmStrategist:
                 estimated_severity=Severity.MEDIUM,
                 prior_confidence=0.5,
                 source="llm",
+                probe_spec=probe_spec,
             ))
         logger.info("strategist: parsed %d grounded hypothesis(es) from LLM", len(out))
         return out
+
+    def _build_probe_spec(self, probe, endpoint: str, param: str, tparams: list) -> dict | None:
+        """Assemble an AI-authored probe spec from the model's 'probe' object,
+        pinned to the grounded endpoint/param. Returns None if the essentials
+        (a payload and a matcher) are absent. This does NOT enforce safety — that
+        is synth_probe.validate_probe_spec's job, run again at execution time."""
+        if not isinstance(probe, dict):
+            return None
+        payload = probe.get("payload")
+        matcher = probe.get("matcher")
+        if not isinstance(payload, str) or not payload.strip() or not isinstance(matcher, dict):
+            return None
+        spec = {
+            "endpoint": endpoint,
+            "param": (param if (param and param in tparams) else None),
+            "payload": payload,
+            "matcher": matcher,
+            "cwe": str(probe.get("cwe", "") or ""),
+            "severity": str(probe.get("severity", "medium") or "medium"),
+            "title": str(probe.get("title", "") or "")[:160],
+            "rationale": str(probe.get("rationale", "") or "")[:600],
+        }
+        return spec
 
     async def _chat(self, system: str, user: str) -> str:
         payload = {

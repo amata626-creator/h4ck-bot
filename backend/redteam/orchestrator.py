@@ -37,9 +37,14 @@ logger = logging.getLogger("h4ck-bot.redteam.orch")
 # candidate ids). Supplied by the caller so the orchestrator stays I/O-free.
 ExecFactory = Callable[[Hypothesis], ExecContext]
 
-# How many adaptive rounds the AI loop may run, and how many new hypotheses it
-# may add per round. Bounds keep an eager model from looping or flooding.
-_MAX_ADAPTIVE_ROUNDS = 3
+# The adaptive AI loop runs until it CONVERGES (a round yields no new grounded
+# hypotheses) — it is no longer capped at a fixed 3 rounds. Two outer bounds keep
+# it finite: a generous round ceiling (convergence almost always stops it first)
+# and a hard wall-clock budget, whichever comes first. This is the "uncap the
+# loop to run until it converges on a budget" model: the AI decides how deep to
+# go, the budget guarantees it always terminates.
+_MAX_ADAPTIVE_ROUNDS = 16
+_ADAPTIVE_TIME_BUDGET_S = 900.0     # hard ceiling; the loop can never exceed this
 _MAX_NEW_PER_ROUND = 8
 
 
@@ -74,6 +79,9 @@ def observed_surface(recon: ReconResult) -> tuple[set[str], set[str]]:
 
 
 def _needs_params(hyp: Hypothesis) -> bool:
+    # AI_PROBE is intentionally NOT here: an AI-authored probe may be parameterless
+    # (it can target a path-level behavior), so a missing param must not drop it.
+    # Its own validator re-checks any param it does name against observed surface.
     from redteam.types import HypothesisKind
     return hyp.kind in {HypothesisKind.INJECTION, HypothesisKind.XSS, HypothesisKind.SSRF,
                         HypothesisKind.XXE, HypothesisKind.SSTI, HypothesisKind.OPEN_REDIRECT}
@@ -149,6 +157,8 @@ class RedTeamOrchestrator:
         semantic: SemanticModel,
         exec_factory: ExecFactory,
         strategist: Optional[Strategist] = None,
+        max_rounds: int = _MAX_ADAPTIVE_ROUNDS,
+        time_budget_s: float = _ADAPTIVE_TIME_BUDGET_S,
     ) -> RedTeamResult:
         # Round 0: the deterministic seed hypotheses (pattern-matched from the
         # semantic model). This is the floor - it runs with or without an AI
@@ -170,7 +180,16 @@ class RedTeamOrchestrator:
         # Grounded + de-duped + RoE-gated + bounded, so the model steers but can
         # neither invent targets nor act unsafely nor loop forever.
         if strategist is not None:
-            for rnd in range(1, _MAX_ADAPTIVE_ROUNDS + 1):
+            import time as _time
+            loop_start = _time.monotonic()
+            rnd = 0
+            while rnd < max_rounds:
+                rnd += 1
+                elapsed = _time.monotonic() - loop_start
+                if elapsed >= time_budget_s:
+                    logger.info("strategist: time budget %.0fs reached after %d round(s) - stopping",
+                                time_budget_s, rnd - 1)
+                    break
                 sctx = StrategyContext(
                     target=target, recon=recon, semantic=semantic,
                     findings_so_far=list(findings), round_index=rnd, already_tried=set(tried),
@@ -184,17 +203,22 @@ class RedTeamOrchestrator:
                 # drop anything whose (kind, endpoint) pairs were all tried already
                 fresh = [h for h in grounded if not _tried_keys(h).issubset(tried)][:_MAX_NEW_PER_ROUND]
                 if not fresh:
-                    logger.info("strategist round %d: no new grounded hypotheses - loop converged", rnd)
+                    logger.info("strategist round %d: no new grounded hypotheses - loop CONVERGED "
+                                "after %.0fs", rnd, _time.monotonic() - loop_start)
                     break
                 rplan = self.planner.plan(fresh, roe, automation_level, target)
-                logger.info("strategist round %d: %d proposed -> %d grounded-fresh -> %d auto",
-                            rnd, len(proposed or []), len(fresh), len(rplan.auto))
+                n_probe = sum(1 for h in fresh if h.kind.value == "ai_authored_probe")
+                logger.info("strategist round %d: %d proposed -> %d grounded-fresh "
+                            "(%d AI-authored probe) -> %d auto",
+                            rnd, len(proposed or []), len(fresh), n_probe, len(rplan.auto))
                 for step in rplan.auto:
                     findings.extend(await self._run_step(step, exec_factory))
                     tried |= _tried_keys(step.hypothesis)
                 # fold newly-planned steps into the overall plan for reporting
                 # (auto/pending/skipped are computed from .steps)
                 plan.steps.extend(rplan.steps)
+            else:
+                logger.info("strategist: round ceiling %d reached - stopping (budget model)", max_rounds)
 
         return RedTeamResult(assessment_id=assessment_id, target=target,
                              plan=plan, findings=findings)
