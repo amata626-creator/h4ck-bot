@@ -318,20 +318,28 @@ async function refreshKillchain() {
     return w;
   };
   band.innerHTML = s.phases.map((p) => {
-    const on = p.vuln_count > 0;
+    const confirmed = p.confirmed_count || 0, candidate = p.candidate_count || 0;
     const sev = worstSev(p.findings);
+    // confirmed weakness -> solid severity accent; candidates only -> dashed; else dim
+    let border, opacity = "";
+    if (confirmed > 0) border = `1px solid var(--${sevClass(sev)},#c41e22)`;
+    else if (candidate > 0) border = "1px dashed var(--medium,#8a6d00)";
+    else { border = "1px solid var(--border)"; opacity = "opacity:.5;"; }
     const items = p.findings.length
-      ? p.findings.slice(0, 8).map((it) =>
-          `<li style="${it.informational ? "color:var(--text-3);" : ""}">${escapeHtml(it.title)}</li>`).join("")
+      ? p.findings.slice(0, 8).map((it) => {
+          const cand = !it.informational && it.status !== "validated";
+          return `<li style="${it.informational ? "color:var(--text-3);" : ""}">${escapeHtml(it.title)}${cand ? " <i style='color:var(--text-3)'>(candidate)</i>" : ""}</li>`;
+        }).join("")
       : `<li style="list-style:none; margin-left:-16px; color:var(--text-3); font-style:italic;">— not reached —</li>`;
+    const countLine = `${confirmed} confirmed${candidate ? " · " + candidate + " candidate" : ""} · ${p.count} total`;
     return `
-      <div style="border:1px solid ${on ? "var(--" + sevClass(sev) + ",#c41e22)" : "var(--border)"}; border-radius:8px; padding:8px; font-size:11px; min-height:76px; ${on ? "" : "opacity:.5;"}">
+      <div style="border:${border}; border-radius:8px; padding:8px; font-size:11px; min-height:76px; ${opacity}">
         <div style="font-weight:700;">${escapeHtml(p.label)}</div>
-        <div style="color:var(--text-3); font-size:10px; margin-bottom:4px;">${p.vuln_count} vuln · ${p.count} total</div>
+        <div style="color:var(--text-3); font-size:10px; margin-bottom:4px;">${countLine}</div>
         <ul style="margin:0; padding-left:16px;">${items}</ul>
       </div>`;
   }).join("");
-  if (reachedEl) reachedEl.textContent = "Reached: " + ((s.reached && s.reached.join(" → ")) || "recon only");
+  if (reachedEl) reachedEl.textContent = "Confirmed progression: " + ((s.reached && s.reached.length && s.reached.join(" → ")) || "none (recon only)");
   if (mitreEl) {
     mitreEl.innerHTML = (s.techniques && s.techniques.length)
       ? "<b>MITRE ATT&CK:</b> " + s.techniques.map((t) =>

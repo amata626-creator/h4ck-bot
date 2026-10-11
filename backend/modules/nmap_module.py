@@ -345,7 +345,10 @@ class NmapModule(ScannerModule):
             cvss=CvssScore(base_score=round(float(score), 1), vector=m.vector),
             cwe=WeaknessRef(cwe_id="CWE-1035", name="Using Components with Known Vulnerabilities (version-inferred)"),
             cve_refs=[VulnerabilityRef(cve_id=m.cve)],
-            kill_chain_phase=KillChainPhase.RECONNAISSANCE,
+            # A known-vulnerable component is an EXPLOITATION-phase weakness (not
+            # recon): a candidate exploit vector. Its NEEDS_REVIEW status conveys
+            # it is version-inferred and unconfirmed, so this doesn't overclaim.
+            kill_chain_phase=KillChainPhase.EXPLOITATION,
             remediation=f"Upgrade {si.product or si.name} to a fixed version, or confirm the backported patch status.",
             business_impact=f"If unpatched, {m.cve} ({m.severity or 'see CVSS'}) may be exploitable against this service.",
             # Version inference needs independent corroboration -> pipeline

@@ -109,14 +109,14 @@ def _asset(host: str) -> Asset:
 
 def _mk(host, title, desc, score, vector, cwe_id, cwe_name, remediation, impact,
         kind=FindingKind.VULNERABILITY, preview="", source="credentialed",
-        requires_corroboration=False) -> Finding:
+        requires_corroboration=False, phase=KillChainPhase.RECONNAISSANCE) -> Finding:
     f = Finding(
         finding_id=str(uuid.uuid4()), title=title, description=desc,
         asset=_asset(host), module_source="credentialed_scan",
         finding_kind=kind,
         cvss=CvssScore(base_score=score, vector=vector),
         cwe=WeaknessRef(cwe_id=cwe_id, name=cwe_name),
-        kill_chain_phase=KillChainPhase.RECONNAISSANCE,
+        kill_chain_phase=phase,
         remediation=remediation, business_impact=impact,
         requires_corroboration=requires_corroboration,
     )
@@ -160,6 +160,7 @@ def audit_to_findings(host: str, data: dict):
             preview=("missing security updates (from the package manager):\n"
                      + "\n".join(f"  {u['pkg']}: {u['current']} -> {u['candidate']}" for u in sec[:50])),
             source="apt_security",
+            phase=KillChainPhase.EXPLOITATION,   # unpatched known-vuln packages = exploitation surface
         ))
     # non-security pending updates -> low/informational note
     nonsec = [u for u in upg if not u["security"]]

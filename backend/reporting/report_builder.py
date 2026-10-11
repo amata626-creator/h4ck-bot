@@ -382,14 +382,21 @@ def killchain_summary(findings: list[Finding]) -> dict:
     phases = []
     for p, label in _KC_ORDER:
         items = buckets[p]
+        confirmed = sum(1 for i in items if not i["informational"] and i["status"] == "validated")
+        candidate = sum(1 for i in items if not i["informational"] and i["status"] != "validated")
         phases.append({
             "phase": p.value, "label": label,
             "count": len(items),
-            "vuln_count": sum(1 for i in items if not i["informational"]),
+            "vuln_count": confirmed + candidate,
+            "confirmed_count": confirmed,
+            "candidate_count": candidate,
             "findings": items,
         })
     techs = sorted(techniques.values(), key=lambda t: (-t["count"], t["id"]))
-    reached = [p["label"] for p in phases if p["vuln_count"] > 0]
+    # "Reached" counts only CONFIRMED (validated) weaknesses — candidate/
+    # needs-review findings populate their phase column but don't claim the
+    # attacker actually got there. Honest progression, not aspiration.
+    reached = [p["label"] for p in phases if p["confirmed_count"] > 0]
     return {"phases": phases, "techniques": techs, "reached": reached}
 
 
@@ -399,20 +406,27 @@ def _render_killchain(data: "ReportData") -> str:
     sevrank = {s.value: i for i, s in enumerate(SEVERITY_ORDER)}
     cols = []
     for p in summ["phases"]:
-        reached = p["vuln_count"] > 0
-        # worst severity in this phase, for the accent
+        confirmed = p["confirmed_count"]
+        candidate = p["candidate_count"]
         worst = "info"
         for it in p["findings"]:
             if not it["informational"] and sevrank.get(it["severity"], 99) < sevrank.get(worst, 99):
                 worst = it["severity"]
         items = "".join(
-            f'<li class="{"info-item" if it["informational"] else ""}">{html.escape(it["title"])}</li>'
+            f'<li class="{"info-item" if it["informational"] else ""}">{html.escape(it["title"])}'
+            + ("" if it["informational"] or it["status"] == "validated" else " <i>(candidate)</i>")
+            + '</li>'
             for it in p["findings"][:8]
         ) or '<li class="kc-empty">— not reached —</li>'
+        count_line = (f'{confirmed} confirmed'
+                      + (f' · {candidate} candidate' if candidate else '')
+                      + f' · {p["count"]} total')
+        # Accent only when a CONFIRMED weakness lands here (candidates don't claim the phase).
+        cls = "kc-on" if confirmed > 0 else ("kc-cand" if candidate > 0 else "kc-off")
         cols.append(
-            f'<div class="kc-col {"kc-on" if reached else "kc-off"}">'
+            f'<div class="kc-col {cls}">'
             f'<div class="kc-phase">{html.escape(p["label"])}</div>'
-            f'<div class="kc-count">{p["vuln_count"]} vuln · {p["count"]} total</div>'
+            f'<div class="kc-count">{count_line}</div>'
             f'<ul class="kc-items sev-{html.escape(worst)}">{items}</ul></div>'
         )
     techs = "".join(
@@ -433,6 +447,7 @@ def _render_killchain(data: "ReportData") -> str:
         '.kc-col{border:1px solid var(--border);border-radius:8px;padding:8px;font-size:11px;min-height:70px;}'
         '.kc-col.kc-off{opacity:.45;}'
         '.kc-col.kc-on{border-color:var(--crit);}'
+        '.kc-col.kc-cand{border-style:dashed;border-color:var(--med);}'
         '.kc-phase{font-weight:700;font-size:11px;margin-bottom:2px;}'
         '.kc-count{color:var(--muted);font-size:10px;margin-bottom:4px;}'
         '.kc-items{margin:0;padding-left:14px;}'
