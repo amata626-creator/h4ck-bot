@@ -1485,7 +1485,13 @@ async def _run_redteam_pipeline(
     strategist = None
     if automation_level == "autonomous":
         from redteam.strategist import LlmStrategist
-        strategist = LlmStrategist(model=r_model, timeout=min(r_timeout, 120.0))
+        # Give the strategist the SAME timeout budget as the semantic model
+        # (H4CK_BOT_REASONING_TIMEOUT, default 180s). The old min(..,120s) cap
+        # was the reason the live loop died on a CPU-bound box: semantic used
+        # ~122s, then the strategist's 120s cap tripped a ReadTimeout and the
+        # whole adaptive loop "converged" with zero rounds. On slow hosts raise
+        # H4CK_BOT_REASONING_TIMEOUT further.
+        strategist = LlmStrategist(model=r_model, timeout=r_timeout)
     result = await orch.assess(
         assessment_id=assessment_id, target=target, roe=roe,
         automation_level=automation_level, recon=recon,

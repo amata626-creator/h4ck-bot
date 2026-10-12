@@ -225,15 +225,18 @@ async def discover_endpoints(base_url: str, max_pages: int = 40,
                 logger.info(f"deep_crawler: visited {url} -> {new_count} new link(s) queued "
                            f"({len(visited)}/{max_pages} pages, {len(endpoints)} endpoint(s) observed so far)")
 
-            if js_bundles:
+            # The LLM JS-extraction is a BONUS on top of the regex pass (which
+            # already harvested endpoint-like strings from every bundle). It runs
+            # only if the client actually implements extract_endpoints_from_js —
+            # our OllamaClient does not, and blindly calling it crashed the whole
+            # Playwright phase (AttributeError). Guard it: no method -> skip
+            # cleanly and keep the regex + rendered + XHR results. This also
+            # avoids piling several slow LLM calls onto a CPU-bound recon.
+            ollama = OllamaClient(model=_resolve_model(model))
+            _extractor = getattr(ollama, "extract_endpoints_from_js", None)
+            if js_bundles and _extractor is not None:
                 logger.info(f"deep_crawler: {base_url} - {len(js_bundles)} JS bundle(s) captured, "
                            f"running AI-assisted endpoint extraction on up to {MAX_JS_FILES_FOR_AI}")
-                # Uses the engine's reasoning model (H4CK_BOT_REASONING_MODEL,
-                # e.g. qwen2.5:3b) via _resolve_model, not a hardcoded 8B model
-                # that times out on CPU hosts and not OllamaClient's own
-                # 'mistral:7b' default (never installed here, silently 404s and
-                # was swallowed as "0 endpoints").
-                ollama = OllamaClient(model=_resolve_model(model))
                 ai_endpoint_total = 0
                 # Prioritize bundles the regex pass already proved contain
                 # endpoint-like strings - a webpack runtime/manifest bundle
@@ -250,7 +253,7 @@ async def discover_endpoints(base_url: str, max_pages: int = 40,
                                    f"skipping remaining {len(prioritized_urls) - i} bundle(s)")
                         break
                     js_body = js_bundles[js_url]
-                    ai_endpoints = await ollama.extract_endpoints_from_js(js_body, js_url)
+                    ai_endpoints = await _extractor(js_body, js_url)
                     new_from_ai = 0
                     for ep in ai_endpoints:
                         full = urljoin(base_url, ep)
@@ -261,6 +264,9 @@ async def discover_endpoints(base_url: str, max_pages: int = 40,
                     logger.info(f"deep_crawler: AI extraction on {js_url} -> "
                                f"{len(ai_endpoints)} endpoint(s) returned, {new_from_ai} new")
                 logger.info(f"deep_crawler: {base_url} - AI-assisted pass added {ai_endpoint_total} new endpoint(s) total")
+            elif js_bundles:
+                logger.info(f"deep_crawler: {base_url} - {len(js_bundles)} JS bundle(s) captured; "
+                           f"LLM JS-extraction unavailable on this client, using regex hits only")
             else:
                 logger.info(f"deep_crawler: {base_url} - no same-origin JS bundles captured, skipping AI pass")
 
