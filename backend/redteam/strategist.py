@@ -29,7 +29,7 @@ import uuid
 import httpx
 
 from recon.types import ReconResult
-from redteam.orchestrator import StrategyContext, observed_surface
+from redteam.orchestrator import StrategyContext, observed_surface, observed_endpoints_detail
 from redteam.types import Hypothesis, HypothesisKind, Severity, Technique
 
 logger = logging.getLogger("h4ck-bot.redteam.strategist")
@@ -95,6 +95,11 @@ _SYSTEM = (
     "4. Do not repeat anything in ALREADY TRIED.\n"
     "5. Prefer pivots justified by a confirmed finding (same bug class on a "
     "sibling endpoint; chaining two findings).\n"
+    "6. The ENDPOINTS list is ordered most-promising first and tagged with its "
+    "discovery source and parameters. Favor endpoints that carry parameters and "
+    "those found via api/xhr/spec capture (source deep-crawler/openapi/ai-fuzz) "
+    "- a live API call with params is far likelier to be real attack surface "
+    "than a static page. Spend your proposals there first.\n"
     "Respond with STRICT JSON only: "
     '{\"next\": [{\"kind\": \"...\", \"endpoint\": \"/path\", \"param\": \"name_or_empty\", '
     '\"why\": \"one sentence grounded in the evidence\", \"probe\": {...only for ai_probe...}}]}'
@@ -129,11 +134,22 @@ class LlmStrategist:
             for f in ctx.findings_so_far
         ][:25] or ["(none confirmed yet)"]
         tried = sorted(f"{k}:{e}" for (k, e) in ctx.already_tried)[:40] or ["(none)"]
+        # Ranked, source-tagged endpoint view: most-promising surface first, so
+        # the model spends its budget on live API/param endpoints, not static
+        # pages. One line each: "<path>  [source]  methods=[..]  params=[..]".
+        detail = observed_endpoints_detail(ctx.recon)
+        ep_lines = [
+            f"  {d['path']}  [{d['source']}]"
+            + (f"  auth" if d.get("auth_required") else "")
+            + (f"  params={json.dumps(d['params'])}" if d["params"] else "  params=[]")
+            for d in detail
+        ] or ["  (none)"]
         return (
             f"TARGET: {ctx.target}\nROUND: {ctx.round_index}\n\n"
-            "OBSERVED SURFACE (the ONLY endpoints/params you may use):\n"
-            f"  endpoints: {json.dumps(paths)}\n"
-            f"  parameters: {json.dumps(params)}\n\n"
+            "OBSERVED ENDPOINTS (ordered most-promising first; the ONLY paths you may use):\n"
+            + "\n".join(ep_lines) + "\n\n"
+            "ALL OBSERVED PARAMETER NAMES (the ONLY params you may use):\n"
+            f"  {json.dumps(params)}\n\n"
             "CONFIRMED / OBSERVED SO FAR:\n" + "\n".join(confirmed) + "\n\n"
             "ALREADY TRIED (kind:endpoint — do not repeat):\n" + "\n".join(tried) + "\n\n"
             f"Propose up to {self.max_items} NEW checks as JSON per the system instructions. "

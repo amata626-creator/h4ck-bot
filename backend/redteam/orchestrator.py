@@ -78,6 +78,57 @@ def observed_surface(recon: ReconResult) -> tuple[set[str], set[str]]:
     return paths, params
 
 
+# Discovery sources that tend to surface REAL, dynamic attack surface (an API
+# the app actually calls, a declared spec route) rather than a static page a
+# crawler merely linked to. Used only to RANK what the strategist sees first —
+# never to filter grounding, which still allows every observed path.
+_HIGH_VALUE_SOURCES = {"deep-crawler", "openapi", "ai-fuzz", "js_bundle", "js-bundle", "headless"}
+_API_PATH_HINTS = ("/api/", "/graphql", "/rest/", "/v1/", "/v2/", "/v3/", "/.well-known/")
+
+
+def _endpoint_promise(ep) -> int:
+    """A deterministic 'worth testing first' score for one observed endpoint.
+    Documented and evidence-based, not a guess: parameters enable input-level
+    bugs; dynamic/spec sources and API-shaped paths are far likelier to be real
+    attack surface than a linked marketing page; an auth-gated endpoint tends to
+    guard objects (BOLA/IDOR). This only orders what the AI sees — it changes no
+    verdict and filters nothing."""
+    score = 0
+    params = ep.params or []
+    if params:
+        score += 3 + min(len(params) - 1, 3)      # params are where injection/XSS/SSTI live
+    if (ep.discovered_from or "") in _HIGH_VALUE_SOURCES:
+        score += 2
+    path = (ep.path or "").lower()
+    if any(h in path for h in _API_PATH_HINTS):
+        score += 2
+    if "json" in (ep.content_type or "").lower():
+        score += 1
+    if ep.auth_required is True:
+        score += 1                                  # authed endpoints often guard objects
+    return score
+
+
+def observed_endpoints_detail(recon: ReconResult, limit: int = 40) -> list[dict]:
+    """Per-endpoint view for the strategist prompt: path, parameter NAMES, the
+    discovery source, methods and auth state — ranked by _endpoint_promise so the
+    most promising, freshly-discovered surface (e.g. an XHR API call with params)
+    is shown first and survives any truncation. Grounding is unaffected; this is
+    purely about WHERE the AI looks first."""
+    rows = [{
+        "path": ep.path,
+        "params": list(ep.params or []),
+        "source": ep.discovered_from or "unknown",
+        "methods": list(ep.methods or ["GET"]),
+        "auth_required": ep.auth_required,
+        "_score": _endpoint_promise(ep),
+    } for ep in recon.endpoints]
+    rows.sort(key=lambda r: (-r["_score"], r["path"]))
+    for r in rows:
+        r.pop("_score", None)
+    return rows[:limit]
+
+
 def _needs_params(hyp: Hypothesis) -> bool:
     # AI_PROBE is intentionally NOT here: an AI-authored probe may be parameterless
     # (it can target a path-level behavior), so a missing param must not drop it.
