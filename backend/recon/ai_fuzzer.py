@@ -57,6 +57,18 @@ def _reasoning_model() -> str:
             or "qwen2.5:3b")
 
 
+def _reasoning_timeout(default: float = 120.0) -> float:
+    """Honor the engine-wide reasoning timeout (H4CK_BOT_REASONING_TIMEOUT) so a
+    CPU-bound / loaded Ollama doesn't make the fuzzer's path-proposal call time
+    out and silently shrink the discovered surface — the 60s hardcode did exactly
+    that under concurrent load. Floored generously; this is best-effort anyway."""
+    v = os.environ.get("H4CK_BOT_REASONING_TIMEOUT", "").strip()
+    try:
+        return max(float(v), default) if v else default
+    except ValueError:
+        return default
+
+
 def _ollama_base() -> str:
     return os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 
@@ -105,11 +117,13 @@ async def _propose_paths(tech_summary: str, known_paths: list[str], timeout: flo
 
 
 async def discover(client: "httpx.AsyncClient", base_url: str, tech_summary: str,
-                   known_paths: list[str], timeout: float = 60.0, log=None) -> list[Endpoint]:
+                   known_paths: list[str], timeout: float | None = None, log=None) -> list[Endpoint]:
     """Return endpoints confirmed to exist from AI-proposed, context-aware
     candidates. `client` is the recon httpx client (carries the auth session)."""
     def _log(m):
         (log or logger.info)(m)
+    if timeout is None:
+        timeout = _reasoning_timeout()
     try:
         raw = await _propose_paths(tech_summary, known_paths, timeout)
     except Exception as exc:  # noqa: BLE001 - best-effort
