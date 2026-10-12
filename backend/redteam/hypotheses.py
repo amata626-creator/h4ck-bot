@@ -55,6 +55,33 @@ class HypothesisGenerator:
             """Keep only paths recon actually saw — the anti-hallucination gate."""
             return [p for p in paths if p in discovered]
 
+        # ── 0. Exposed sensitive files (.git/.env/credentials/...) ───────
+        # A host-level audit sweep that always runs once: the executor checks a
+        # fixed list of well-known high-value paths by CONTENT SIGNATURE. These
+        # are a standard checklist, not crawl-derived surface, so the hypothesis
+        # targets the base path and the executor owns the path list.
+        out.append(Hypothesis(
+            hypothesis_id=new_id(),
+            kind=HypothesisKind.CONFIG_EXPOSURE,
+            title="Exposed sensitive files / source-control / config",
+            target_endpoints=["/"],
+            rationale=(
+                "Checking a fixed list of well-known sensitive paths (.git/config, .env, "
+                ".aws/credentials, backup configs, .htpasswd, server-status, phpinfo) by content "
+                "signature. Reported only when the response carries the expected signature, never "
+                "a bare 200, so a soft-404 app cannot false-positive. GET-only."
+            ),
+            evidence_refs=["audit.exposed_files"],
+            cwe=WeaknessRef(cwe_id="CWE-538", name="File and Directory Information Exposure"),
+            mitre=MitreTechnique(technique_id="T1592", tactic="reconnaissance",
+                                 name="Gather Victim Host Information"),
+            kill_chain_phase=KillChainPhase.RECONNAISSANCE,
+            estimated_severity=Severity.HIGH,
+            prior_confidence=0.2,
+            suggested_technique=Technique.MISCONFIG_CHECK,
+            requires_active_testing=True,
+        ))
+
         # ── 1. BOLA / IDOR on owned, instance-scoped resources ───────────
         # The strongest Web/API signal and the one the semantic model is built
         # to surface: a resource with an owner field + endpoints that address a

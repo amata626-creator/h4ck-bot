@@ -43,6 +43,7 @@ class HypothesisKind(str, Enum):
     SSTI = "server_side_template_injection"          # CWE-1336
     OPEN_REDIRECT = "open_redirect"                   # CWE-601
     CORS_MISCONFIG = "cors_misconfiguration"          # CWE-942
+    CONFIG_EXPOSURE = "config_exposure"               # CWE-538 (exposed .git/.env/etc.)
     AI_PROBE = "ai_authored_probe"                    # AI synthesizes its own safe check
     SECURITY_MISCONFIG = "security_misconfiguration"  # CWE-16
 

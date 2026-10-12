@@ -1242,6 +1242,119 @@ class CorsExecutor:
         return finding
 
 
+# Curated high-value exposed-file checks. Each is confirmed by a CONTENT
+# SIGNATURE, never a bare 200 — so an app that soft-404s "everything returns 200"
+# cannot produce a phantom finding. (path, match_kind, needle, label, score, cwe).
+# match_kind "sub" = case-sensitive substring; "re" = regex (the matched text
+# becomes the static_claim, so it is literally present in the evidence preview).
+_EXPOSED_FILES = [
+    ("/.git/config", "sub", "[core]", "Exposed .git repository config", 8.1, "CWE-527"),
+    ("/.git/HEAD", "sub", "ref: refs/", "Exposed .git repository", 7.5, "CWE-527"),
+    ("/.env", "re", r"(?mi)^\s*(APP_KEY|APP_SECRET|SECRET_KEY|DB_PASSWORD|DATABASE_URL|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|API_KEY|JWT_SECRET)\s*=\s*\S+",
+     "Exposed .env with secrets", 9.1, "CWE-312"),
+    ("/.aws/credentials", "sub", "aws_access_key_id", "Exposed AWS credentials file", 9.1, "CWE-312"),
+    ("/wp-config.php.bak", "sub", "DB_PASSWORD", "Exposed WordPress config backup", 9.1, "CWE-530"),
+    ("/.htpasswd", "re", r"[^\s:]+:\$(?:apr1|2[aby]|1)\$", "Exposed .htpasswd credentials", 7.5, "CWE-522"),
+    ("/.svn/entries", "re", r"(?m)^\d+\s*$|svn://", "Exposed .svn metadata", 6.5, "CWE-527"),
+    ("/server-status", "sub", "Apache Server Status", "Apache mod_status exposed", 5.3, "CWE-497"),
+    ("/phpinfo.php", "sub", "phpinfo()", "phpinfo() exposed", 5.3, "CWE-497"),
+    ("/.DS_Store", "sub", "Bud1", "Exposed .DS_Store (directory listing leak)", 4.3, "CWE-527"),
+]
+
+
+class ConfigExposureExecutor:
+    """Exposed sensitive files / source-control / config (CWE-538 family).
+
+    Sweeps a small, curated list of well-known high-value paths (.git/config,
+    .env, .aws/credentials, wp-config backups, .htpasswd, server-status, ...) and
+    reports one ONLY when the response both returns 200 AND contains the path's
+    expected CONTENT SIGNATURE. Matching on content, not a bare status, is what
+    keeps this false-positive-free against soft-404 apps that answer everything
+    with 200. GET-only and non-destructive; these are fixed, well-known audit
+    paths (a checklist, not invented surface). The signature is literally present
+    in the response, so each finding is static_claim-gated with
+    requires_corroboration=False — a single authoritative observation."""
+
+    handles = {HypothesisKind.CONFIG_EXPOSURE}
+    _MAX = 12
+
+    async def execute(self, hyp: Hypothesis, ctx: "ExecContext") -> list[Finding]:
+        if not ctx.roe.target_authorized(ctx.target_host):
+            logger.warning("config-exposure: %s not authorized by RoE - skipping", ctx.target_host)
+            return []
+        import re as _re
+        base = (ctx.base_url or f"https://{ctx.target_host}").rstrip("/")
+        findings: list[Finding] = []
+        for i, (path, kind, needle, label, score, cwe) in enumerate(_EXPOSED_FILES):
+            if i >= self._MAX:
+                break
+            try:
+                r = await ctx.fetch(base + path)
+            except Exception as e:  # noqa: BLE001
+                logger.info("config-exposure: fetch failed %s: %s", path, e)
+                continue
+            await asyncio.sleep(ctx.pace_seconds)
+            if r.status != 200 or not (r.text or ""):
+                continue
+            body = r.text
+            if kind == "sub":
+                if needle not in body:
+                    continue
+                claim = needle
+            else:  # regex
+                m = _re.search(needle, body)
+                if not m:
+                    continue
+                claim = m.group(0)[:80]
+            findings.append(self._finding(path, label, score, cwe, r, claim, ctx))
+        return findings
+
+    def _finding(self, path, label, score, cwe, r, claim, ctx) -> Finding:
+        asset = Asset(asset_id="a0", name=ctx.target_host, asset_type="web",
+                      scope_approved=True, metadata={"exposure": "internet"})
+        # Never echo the full secret file into evidence — just the signature line
+        # that proves exposure, plus a short, redacted context window.
+        preview = (
+            f"GET {r.url}\nstatus: {r.status}\n"
+            f"exposed file: {path}\nmatched signature: {claim}\n"
+            f"context: {_snippet(r.text, claim, pad=40)}"
+        )
+        finding = Finding(
+            finding_id=str(uuid.uuid4()),
+            title=f"{label} at {path}",
+            description=(
+                f"{label}: a GET of {path} returned 200 and the response contains the "
+                f"expected signature ({claim!r}), confirming the file is publicly exposed. "
+                "Exposed source-control, environment, or credential files leak secrets, "
+                "source, and internal structure. Confirmed read-only (GET) by content "
+                "signature, not a bare status, so a soft-404 app cannot trigger it. "
+                "Evidence is redacted to the matched signature — the full file is not stored."
+            ),
+            asset=asset, module_source="config_exposure_executor",
+            finding_kind=FindingKind.VULNERABILITY,
+            cvss=CvssScore(base_score=score,
+                           vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+            cwe=WeaknessRef(cwe_id=cwe, name="Exposure of Sensitive Information to an Unauthorized Actor"),
+            mitre_techniques=[MitreTechnique(technique_id="T1592", tactic="reconnaissance",
+                                             name="Gather Victim Host Information")],
+            kill_chain_phase=KillChainPhase.RECONNAISSANCE,
+            remediation=(
+                f"Remove {path} from the web root (and block dotfiles / backup "
+                "extensions at the web server). Rotate any credentials it exposed."
+            ),
+            business_impact="Exposed config/credential/source files hand an attacker secrets and internal detail.",
+            requires_corroboration=False,
+        )
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.RAW_OUTPUT, raw_bytes=preview.encode(),
+            storage_ref=f"mem://cfgexp/{finding.finding_id}",
+            description=f"Exposed sensitive file {path} (signature-confirmed)",
+            metadata={"preview": preview, "static_claim": claim, "static_artifact": True},
+        ))
+        logger.info("config-exposure: %s exposed at %s (sig=%r)", label, path, claim)
+        return finding
+
+
 class ExecutorRegistry:
     """Maps a hypothesis to the executor that can safely check it. Each executor
     is non-destructive (GET-only, inert probes), scope-gated against the RoE, and
@@ -1262,6 +1375,7 @@ class ExecutorRegistry:
             SstiExecutor(),
             OpenRedirectExecutor(),
             CorsExecutor(),
+            ConfigExposureExecutor(),
             GenericProbeExecutor(),   # AI writes its own check (validated + evidence-gated)
         ]
 
