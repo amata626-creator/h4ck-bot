@@ -59,7 +59,10 @@ class FetchResult:
 
 # A Fetcher performs ONE safe GET and returns a FetchResult. Injected so tests
 # can supply crafted responses and production supplies a real httpx client.
-Fetcher = Callable[[str], Awaitable[FetchResult]]
+# Optionally accepts per-request headers (e.g. an Origin header for the CORS
+# check); callers that don't pass headers are unaffected, and a fetcher that
+# ignores the kwarg still satisfies the contract.
+Fetcher = Callable[..., Awaitable[FetchResult]]
 # A Poster performs ONE body POST (url, body, content_type) -> FetchResult.
 # Injected like Fetcher; only the XXE executor needs it, and only for an inert,
 # detection-only XML payload. None when posting isn't wired.
@@ -1119,6 +1122,126 @@ class OpenRedirectExecutor:
         return findings
 
 
+class CorsExecutor:
+    """Cross-Origin Resource Sharing misconfiguration (CWE-942).
+
+    Sends a GET with an attacker-controlled `Origin` header and checks whether
+    the server REFLECTS that arbitrary origin back in Access-Control-Allow-Origin
+    — the unambiguous misconfiguration. If it also sets
+    Access-Control-Allow-Credentials: true, any site can read authenticated
+    responses cross-origin (account-takeover-grade). A plain `*` ACAO without
+    credentials is NOT reported: that is common and usually intentional, and the
+    no-false-positive rule means we only flag the dispositive reflection.
+
+    GET-only and non-destructive: the sole change is one request header. The
+    verdict rests on a response header that is literally present, so the finding
+    is static_claim-gated and needs no second signal (requires_corroboration
+    False), the same contract the nmap exposure finding uses."""
+
+    handles = {HypothesisKind.CORS_MISCONFIG}
+
+    async def execute(self, hyp: Hypothesis, ctx: "ExecContext") -> list[Finding]:
+        if not ctx.roe.target_authorized(ctx.target_host):
+            logger.warning("cors: %s not authorized by RoE - skipping", ctx.target_host)
+            return []
+        base = ctx.base_url or f"https://{ctx.target_host}"
+        findings: list[Finding] = []
+        probed = 0
+        for path in hyp.target_endpoints:
+            if probed >= ctx.max_probes:
+                break
+            probed += 1
+            token = uuid.uuid4().hex[:8]
+            evil = f"https://evil-{token}.example"
+            url = base.rstrip("/") + "/" + path.lstrip("/")
+            try:
+                probe = await ctx.fetch(url, headers={"Origin": evil})
+            except TypeError:
+                # A fetcher that doesn't accept headers can't do this check; skip
+                # honestly rather than send a header-less request and misjudge.
+                logger.info("cors: fetcher does not support request headers - skipping")
+                return []
+            except Exception as e:  # noqa: BLE001
+                logger.info("cors: fetch failed %s: %s", url, e)
+                continue
+            await asyncio.sleep(ctx.pace_seconds)
+            f = self._evaluate(path, evil, probe, ctx)
+            if f is not None:
+                findings.append(f)
+        return findings
+
+    def _evaluate(self, path, evil, probe, ctx) -> Optional[Finding]:
+        h = probe.headers or {}
+        acao = (h.get("access-control-allow-origin") or "").strip()
+        acac = (h.get("access-control-allow-credentials") or "").strip().lower()
+        # Only the reflection of our arbitrary origin is dispositive. A bare "*"
+        # (with or without credentials) is not reported — too often intentional,
+        # and browsers ignore "*"+credentials anyway. No-FP discipline.
+        if acao.lower() != evil.lower():
+            return None
+        credentialed = acac == "true"
+        score = 8.1 if credentialed else 5.4
+        asset = Asset(asset_id="a0", name=ctx.target_host, asset_type="web",
+                      scope_approved=True, metadata={"exposure": "internet"})
+        preview = (
+            f"GET {probe.url}\nRequest Origin: {evil}\n"
+            f"Access-Control-Allow-Origin: {acao}\n"
+            f"Access-Control-Allow-Credentials: {acac or '(absent)'}\n"
+            f"reflected arbitrary origin: {evil}"
+        )
+        finding = Finding(
+            finding_id=str(uuid.uuid4()),
+            title=f"CORS misconfiguration on {path}"
+                  + (" (credentialed)" if credentialed else ""),
+            description=(
+                f"The endpoint {path} reflects an arbitrary request Origin "
+                f"({evil}) back in its Access-Control-Allow-Origin response header"
+                + (", and sets Access-Control-Allow-Credentials: true — so any "
+                   "attacker-controlled web page can read this endpoint's "
+                   "authenticated responses cross-origin (session data, tokens, "
+                   "PII), a cross-origin account-takeover primitive."
+                   if credentialed else
+                   ". Any origin can read this endpoint's responses cross-origin; "
+                   "if it ever returns sensitive data this is a cross-origin leak.")
+                + " Confirmed read-only (GET) by reflecting a unique attacker "
+                "origin; the only change was one request header."
+            ),
+            asset=asset, module_source="cors_executor",
+            finding_kind=FindingKind.VULNERABILITY,
+            cvss=CvssScore(base_score=score,
+                           vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N"
+                                  if credentialed else
+                                  "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N"),
+            cwe=WeaknessRef(cwe_id="CWE-942",
+                            name="Permissive Cross-domain Policy with Untrusted Domains"),
+            mitre_techniques=[MitreTechnique(technique_id="T1190", tactic="initial-access",
+                                             name="Exploit Public-Facing Application")],
+            kill_chain_phase=KillChainPhase.EXPLOITATION,
+            remediation=(
+                "Do not reflect the request Origin. Use a server-side allowlist of "
+                "trusted origins, and never combine a reflected/`*` origin with "
+                "Access-Control-Allow-Credentials: true."
+            ),
+            business_impact=(
+                "A malicious site can read authenticated responses from this endpoint "
+                "in a victim's browser, exposing session data or PII."
+                if credentialed else
+                "A malicious site can read this endpoint's responses cross-origin."
+            ),
+            # Dispositive: the ACAO header literally reflects our unique origin.
+            requires_corroboration=False,
+        )
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.RAW_OUTPUT, raw_bytes=preview.encode(),
+            storage_ref=f"mem://cors/{finding.finding_id}",
+            description=f"CORS arbitrary-origin reflection on {path}",
+            metadata={"preview": preview, "static_claim": evil, "static_artifact": True},
+        ))
+        logger.info("cors: potential finding on %s (reflected %s, credentials=%s)",
+                    path, evil, credentialed)
+        return finding
+
+
 class ExecutorRegistry:
     """Maps a hypothesis to the executor that can safely check it. Each executor
     is non-destructive (GET-only, inert probes), scope-gated against the RoE, and
@@ -1138,6 +1261,7 @@ class ExecutorRegistry:
             XxeOobExecutor(),
             SstiExecutor(),
             OpenRedirectExecutor(),
+            CorsExecutor(),
             GenericProbeExecutor(),   # AI writes its own check (validated + evidence-gated)
         ]
 

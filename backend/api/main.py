@@ -1308,10 +1308,15 @@ def _make_live_fetch(auth: dict | None = None):
     if auth.get("cookie"):
         extra["Cookie"] = str(auth["cookie"])
 
-    async def _live_fetch(url: str) -> FetchResult:
+    async def _live_fetch(url: str, headers: dict | None = None) -> FetchResult:
         # GET only — the executor never needs more, and this keeps it non-destructive.
+        # Per-request headers (e.g. the CORS check's Origin) merge over the auth
+        # session; callers that pass none behave exactly as before.
+        req_headers = dict(extra)
+        for k, v in (headers or {}).items():
+            req_headers[str(k)] = str(v)
         async with httpx.AsyncClient(
-            verify=False, timeout=10.0, follow_redirects=True, headers=extra or None,
+            verify=False, timeout=10.0, follow_redirects=True, headers=req_headers or None,
         ) as c:
             r = await c.get(url)
             return FetchResult(url=url, status=r.status_code, text=r.text[:200000],

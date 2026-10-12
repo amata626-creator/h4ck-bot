@@ -251,6 +251,45 @@ class HypothesisGenerator:
                 requires_active_testing=True,
             ))
 
+        # ── 3f. CORS misconfiguration on API/JSON endpoints + the base ───
+        # CORS is per-endpoint and header-based (no params needed). Probe the
+        # likeliest CORS-bearing surface: the base path and endpoints that look
+        # like an API or return JSON. Capped so a big crawl doesn't flood.
+        _cors_seen: set[str] = set()
+        _cors_targets: list[str] = []
+        for ep in recon.endpoints:
+            p = ep.path or ""
+            pl = p.lower()
+            looks_api = (any(h in pl for h in ("/api/", "/graphql", "/rest/", "/v1/", "/v2/", "/v3/"))
+                         or "json" in (ep.content_type or "").lower())
+            if (p == "/" or looks_api) and p not in _cors_seen:
+                _cors_seen.add(p)
+                _cors_targets.append(p)
+            if len(_cors_targets) >= 10:
+                break
+        for p in _cors_targets:
+            out.append(Hypothesis(
+                hypothesis_id=new_id(),
+                kind=HypothesisKind.CORS_MISCONFIG,
+                title=f"CORS misconfiguration candidate on {p}",
+                target_endpoints=[p],
+                rationale=(
+                    f"{p} is API/JSON-like surface that may set CORS headers. Sending an arbitrary "
+                    "attacker Origin and checking whether it is reflected in Access-Control-Allow-Origin "
+                    "(especially with Allow-Credentials: true) confirms a permissive cross-origin policy. "
+                    "GET-only; the sole change is one request header."
+                ),
+                evidence_refs=[f"recon.endpoint:{p}"],
+                cwe=WeaknessRef(cwe_id="CWE-942", name="Permissive Cross-domain Policy with Untrusted Domains"),
+                mitre=MitreTechnique(technique_id="T1190", tactic="initial-access",
+                                     name="Exploit Public-Facing Application"),
+                kill_chain_phase=KillChainPhase.EXPLOITATION,
+                estimated_severity=Severity.MEDIUM,
+                prior_confidence=0.3,
+                suggested_technique=Technique.API_TESTING,
+                requires_active_testing=True,
+            ))
+
         # ── 4. Broken authentication around the login surface ────────────
         if recon.auth.login_paths:
             login = ground(recon.auth.login_paths) or recon.auth.login_paths[:2]
