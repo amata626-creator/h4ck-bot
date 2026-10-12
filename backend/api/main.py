@@ -1036,11 +1036,16 @@ async def _run_assessment_task(
         # findings already stored.
         if getattr(req, "full_engine", False):
             try:
+                # Hand the AI engine what the classic scanners already found on
+                # this target, so the strategist can pivot on it (an exposed
+                # admin panel, a SQL-error disclosure, an open DB port) rather
+                # than reasoning only from its own recon.
                 rt_findings = await _run_redteam_pipeline(
                     assessment_id, req.target, roe,
                     getattr(req, "automation_level", "autonomous"),
                     req.llm_model, getattr(req, "llm_timeout", 300.0),
                     auth=_auth_from_request(req),
+                    prior_findings=_STORE.list_findings(assessment_id),
                 )
                 logger.info("assessment %s: red-team engine added %d findings",
                             assessment_id, len(rt_findings))
@@ -1431,6 +1436,7 @@ async def _compose_attack_paths(assessment_id: str, llm_model: str, llm_timeout:
 async def _run_redteam_pipeline(
     assessment_id: str, target: str, roe, automation_level: str,
     llm_model: str, llm_timeout: float = 120.0, auth: dict | None = None,
+    prior_findings: list[Finding] | None = None,
 ) -> list[Finding]:
     """Run the full red-team engine (recon -> semantic -> hypotheses -> gated
     plan -> executors -> validation), persist its findings, and record the
@@ -1484,6 +1490,7 @@ async def _run_redteam_pipeline(
         assessment_id=assessment_id, target=target, roe=roe,
         automation_level=automation_level, recon=recon,
         semantic=semantic, exec_factory=factory, strategist=strategist,
+        prior_findings=prior_findings,
     )
     # Screenshot each finding at its OWN url (the reflected-XSS page, the
     # probed endpoint), carrying the session so authenticated pages render —

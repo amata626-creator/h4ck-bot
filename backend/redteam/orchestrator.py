@@ -61,6 +61,11 @@ class StrategyContext:
     findings_so_far: list[Finding]
     round_index: int
     already_tried: set[tuple]          # {(kind, endpoint)} pairs already probed
+    # Findings OTHER scanners (Nuclei, nmap, misconfig modules) already produced
+    # in this same assessment, as reasoning context. The strategist may pivot
+    # from these — but grounding is unchanged: it can still only TARGET endpoints
+    # recon actually observed, so a noisy tool line can't invent attack surface.
+    tool_findings: list[Finding] = field(default_factory=list)
 
 
 # The strategist proposes the next round of hypotheses from what's been learned.
@@ -260,6 +265,7 @@ class RedTeamOrchestrator:
         strategist: Optional[Strategist] = None,
         max_rounds: int = _MAX_ADAPTIVE_ROUNDS,
         time_budget_s: float = _ADAPTIVE_TIME_BUDGET_S,
+        prior_findings: Optional[list[Finding]] = None,
     ) -> RedTeamResult:
         # Round 0: the deterministic seed hypotheses (pattern-matched from the
         # semantic model). This is the floor - it runs with or without an AI
@@ -294,6 +300,7 @@ class RedTeamOrchestrator:
                 sctx = StrategyContext(
                     target=target, recon=recon, semantic=semantic,
                     findings_so_far=list(findings), round_index=rnd, already_tried=set(tried),
+                    tool_findings=list(prior_findings or []),
                 )
                 try:
                     proposed = await strategist(sctx)

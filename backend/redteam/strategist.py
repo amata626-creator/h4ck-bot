@@ -137,6 +137,27 @@ class LlmStrategist:
             for f in ctx.findings_so_far
         ][:25] or ["(none confirmed yet)"]
         tried = sorted(f"{k}:{e}" for (k, e) in ctx.already_tried)[:40] or ["(none)"]
+        # Intelligence from OTHER scanners (Nuclei, nmap, misconfig) that already
+        # ran on this target — context to pivot from. Dedup by title, cap, and
+        # drop pure-informational noise so the model sees signal, not a dump.
+        tool_lines: list[str] = []
+        _seen_titles: set[str] = set()
+        for f in (ctx.tool_findings or []):
+            sev = getattr(getattr(f, "severity", None), "value", "") or ""
+            if sev in ("info", "informational", ""):
+                continue
+            t = (getattr(f, "title", "") or "").strip()
+            if not t or t in _seen_titles:
+                continue
+            _seen_titles.add(t)
+            tool_lines.append(f"- [{sev}] {t} (via {getattr(f, 'module_source', 'scanner')})")
+            if len(tool_lines) >= 20:
+                break
+        tool_block = (
+            "FINDINGS FROM OTHER SCANNERS ON THIS TARGET (context — pivot from these, "
+            "but you may still only TARGET endpoints in the list above):\n"
+            + "\n".join(tool_lines) + "\n\n"
+        ) if tool_lines else ""
         # Ranked, source-tagged endpoint view: most-promising surface first, so
         # the model spends its budget on live API/param endpoints, not static
         # pages. One line each: "<path>  [source]  methods=[..]  params=[..]".
@@ -154,7 +175,8 @@ class LlmStrategist:
             "ALL OBSERVED PARAMETER NAMES (the ONLY params you may use):\n"
             f"  {json.dumps(params)}\n\n"
             "CONFIRMED / OBSERVED SO FAR:\n" + "\n".join(confirmed) + "\n\n"
-            "ALREADY TRIED (kind:endpoint — do not repeat):\n" + "\n".join(tried) + "\n\n"
+            + tool_block
+            + "ALREADY TRIED (kind:endpoint — do not repeat):\n" + "\n".join(tried) + "\n\n"
             f"Propose up to {self.max_items} NEW checks as JSON per the system instructions. "
             "If nothing new is worth testing, return {\"next\": []}."
         )
