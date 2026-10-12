@@ -29,7 +29,9 @@ from semantic.types import SemanticModel
 from redteam.executors import ExecContext, ExecutorRegistry
 from redteam.hypotheses import HypothesisGenerator
 from redteam.planner import Planner
-from redteam.types import AssessmentPlan, Hypothesis, PlannedStep
+from redteam.types import (
+    AssessmentPlan, Hypothesis, HypothesisKind, PlannedStep, Severity, Technique,
+)
 
 logger = logging.getLogger("h4ck-bot.redteam.orch")
 
@@ -168,6 +170,54 @@ def _tried_keys(hyp: Hypothesis) -> set[tuple]:
     return {(hyp.kind.value, ep) for ep in (hyp.target_endpoints or [])}
 
 
+# When an AI-authored probe CONFIRMS a lead, the matcher type says which rigorous,
+# hand-written executor should now try to corroborate it — turning a speculative
+# AI find into an executor-grade, double-evidenced finding. This is the explore
+# -> confirm -> harden loop: the AI finds something novel, a deterministic
+# executor nails it down. Mapping is conservative; an unmapped matcher escalates
+# to nothing rather than guess.
+_ESCALATION_BY_MATCHER = {
+    "reflection": (HypothesisKind.XSS, Technique.XSS_TESTING),
+    "error_signature": (HypothesisKind.INJECTION, Technique.INJECTION_TESTING),
+    "time_delay": (HypothesisKind.INJECTION, Technique.INJECTION_TESTING),
+    "status_change": (HypothesisKind.INJECTION, Technique.INJECTION_TESTING),
+}
+
+
+def _escalations_from(source_hyp: Hypothesis, produced: list[Finding]) -> list[Hypothesis]:
+    """If an AI_PROBE step produced a VALIDATED finding, return the rigorous
+    specific-executor hypothesis that should now corroborate it on the same
+    endpoint+param. Empty unless the source is a confirmed AI probe with a
+    mapped matcher."""
+    from core.schema import FindingStatus
+    if source_hyp.kind is not HypothesisKind.AI_PROBE:
+        return []
+    if not any(getattr(f.status, "value", f.status) == FindingStatus.VALIDATED.value for f in produced):
+        return []
+    matcher = ((source_hyp.probe_spec or {}).get("matcher") or {}).get("type")
+    mapped = _ESCALATION_BY_MATCHER.get(str(matcher))
+    if mapped is None:
+        return []
+    kind, tech = mapped
+    return [Hypothesis(
+        hypothesis_id=f"esc-{source_hyp.hypothesis_id}",
+        kind=kind,
+        title=f"{kind.value} on {source_hyp.target_endpoints[0]} (escalated from confirmed AI-probe)"
+              if source_hyp.target_endpoints else f"{kind.value} (escalated)",
+        target_endpoints=list(source_hyp.target_endpoints or []),
+        target_params=list(source_hyp.target_params or []),
+        rationale=("An AI-authored probe confirmed a lead here; escalating to the "
+                   f"rigorous {kind.value} executor to corroborate it with independent evidence."),
+        evidence_refs=["escalation.ai_probe"],
+        suggested_technique=tech,
+        requires_active_testing=True,
+        destructive=False,
+        estimated_severity=Severity.HIGH,
+        prior_confidence=0.65,
+        source="escalation",
+    )]
+
+
 @dataclass
 class RedTeamResult:
     assessment_id: str
@@ -262,12 +312,32 @@ class RedTeamOrchestrator:
                 logger.info("strategist round %d: %d proposed -> %d grounded-fresh "
                             "(%d AI-authored probe) -> %d auto",
                             rnd, len(proposed or []), len(fresh), n_probe, len(rplan.auto))
+                escalations: list[Hypothesis] = []
                 for step in rplan.auto:
-                    findings.extend(await self._run_step(step, exec_factory))
+                    produced = await self._run_step(step, exec_factory)
+                    findings.extend(produced)
                     tried |= _tried_keys(step.hypothesis)
+                    escalations.extend(_escalations_from(step.hypothesis, produced))
                 # fold newly-planned steps into the overall plan for reporting
                 # (auto/pending/skipped are computed from .steps)
                 plan.steps.extend(rplan.steps)
+
+                # Explore -> confirm -> HARDEN: a confirmed AI-authored probe
+                # escalates, this same round, to the rigorous specific executor
+                # (reflection -> XSS, error/time/status -> SQLi) on the same
+                # endpoint+param, so a speculative AI find becomes an
+                # executor-grade, independently-evidenced finding. Grounded,
+                # de-duped against what's already tried, RoE-gated, bounded.
+                esc = ground_hypotheses(escalations, recon)
+                esc = [h for h in esc if not _tried_keys(h).issubset(tried)][:_MAX_NEW_PER_ROUND]
+                if esc:
+                    eplan = self.planner.plan(esc, roe, automation_level, target)
+                    logger.info("strategist round %d: escalating %d confirmed AI-probe(s) "
+                                "-> %d rigorous executor check(s)", rnd, len(esc), len(eplan.auto))
+                    for step in eplan.auto:
+                        findings.extend(await self._run_step(step, exec_factory))
+                        tried |= _tried_keys(step.hypothesis)
+                    plan.steps.extend(eplan.steps)
             else:
                 logger.info("strategist: round ceiling %d reached - stopping (budget model)", max_rounds)
 
