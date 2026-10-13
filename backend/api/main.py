@@ -605,6 +605,30 @@ def _reasoning_timeout(default: float) -> float:
         return default
 
 
+_SCAN_SEM: "asyncio.Semaphore | None" = None
+
+
+def _max_concurrent_scans() -> int:
+    """How many heavy (recon + browser + LLM) scans may run at once. Default 1:
+    on a modest box two concurrent full-engine scans starve the model backend
+    (semantic/strategist timeouts) and spike memory. Raise via
+    H4CK_BOT_MAX_CONCURRENT_SCANS once you have a fast/remote LLM backend."""
+    v = os.environ.get("H4CK_BOT_MAX_CONCURRENT_SCANS", "").strip()
+    try:
+        return max(1, int(v)) if v else 1
+    except ValueError:
+        return 1
+
+
+def _scan_gate() -> "asyncio.Semaphore":
+    """Lazily-created global semaphore that serializes heavy scans. Created on
+    first use so it binds to the running uvicorn event loop."""
+    global _SCAN_SEM
+    if _SCAN_SEM is None:
+        _SCAN_SEM = asyncio.Semaphore(_max_concurrent_scans())
+    return _SCAN_SEM
+
+
 def _allow_cloud_llm() -> bool:
     """Whether a ':cloud' (hosted/GPU) Ollama reasoning model is permitted.
     OFF by default: a cloud model means recon data (endpoint names, response
@@ -972,7 +996,17 @@ async def _run_assessment_task(
     req: RunAssessmentRequest,
     client_ip: str = "unknown",
 ):
+    # Concurrency gate: serialize heavy scans so parallel runs don't starve the
+    # LLM backend or spike memory. If a slot isn't free, the scan QUEUES here
+    # (status reflects it) until one frees, rather than thrashing.
+    gate = _scan_gate()
+    if gate.locked():
+        _STORE.set_status(assessment_id, "queued")
+        logger.info("assessment %s: queued (max %d concurrent scan[s])",
+                    assessment_id, _max_concurrent_scans())
+    await gate.acquire()
     try:
+        _STORE.set_status(assessment_id, "running")
         roe = _build_roe_for(assessment_id, req.target)
 
         # Exactly one Asset per target. Modules declare the asset types
@@ -1077,8 +1111,9 @@ async def _run_assessment_task(
         logger.exception("assessment %s failed", assessment_id)
         _STORE.set_status(assessment_id, f"error: {exc}", error=str(exc))
     finally:
-        # Always release the rate-limit slot, even if the task errored
-        # or was cancelled.
+        # Always release the scan slot + rate-limit slot, even if the task
+        # errored or was cancelled, so a crash can't wedge the queue.
+        gate.release()
         _RATE_LIMITER.release(client_ip)
 
 @app.get("/api/assessments/{assessment_id}/status")
@@ -1542,7 +1577,14 @@ def _auth_from_request(req) -> dict:
 
 
 async def _run_redteam_task(assessment_id: str, req: RunRedTeamRequest) -> None:
+    gate = _scan_gate()
+    if gate.locked():
+        _STORE.set_status(assessment_id, "queued")
+        logger.info("redteam assessment %s: queued (max %d concurrent scan[s])",
+                    assessment_id, _max_concurrent_scans())
+    await gate.acquire()
     try:
+        _STORE.set_status(assessment_id, "running")
         roe = _build_roe_for(assessment_id, req.target)
         await _run_redteam_pipeline(
             assessment_id, req.target, roe, req.automation_level,
@@ -1552,6 +1594,8 @@ async def _run_redteam_task(assessment_id: str, req: RunRedTeamRequest) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.exception("redteam assessment %s failed", assessment_id)
         _STORE.set_status(assessment_id, f"error: {exc}", error=str(exc))
+    finally:
+        gate.release()
 
 
 @app.get("/api/redteam/assessments/{assessment_id}")
