@@ -101,12 +101,14 @@ Schema:
 class SemanticModelBuilder:
     def __init__(
         self,
-        ollama_base_url: str = "http://localhost:11434",
+        ollama_base_url: str | None = None,
         model: str = "llama3.1",
         timeout: float = 300.0,
         allow_cloud: bool = False,
     ):
-        self.base_url = ollama_base_url.rstrip("/")
+        import os
+        self.base_url = (ollama_base_url
+                         or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
         self.model = model
         self.timeout = timeout
         self.allow_cloud = allow_cloud

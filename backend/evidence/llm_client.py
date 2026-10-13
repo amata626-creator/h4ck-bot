@@ -66,8 +66,12 @@ class OllamaClient:
     Ollama process itself.
     """
 
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "mistral:7b", timeout: float = 60.0):
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str | None = None, model: str = "mistral:7b", timeout: float = 60.0):
+        # Default to OLLAMA_BASE_URL so a single env var can point every LLM
+        # layer at a fast backend (a GPU Ollama host, or Ollama cloud). An
+        # explicit base_url still wins.
+        import os
+        self.base_url = (base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
         self.model = model
         self.timeout = timeout
 

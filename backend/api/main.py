@@ -605,6 +605,15 @@ def _reasoning_timeout(default: float) -> float:
         return default
 
 
+def _allow_cloud_llm() -> bool:
+    """Whether a ':cloud' (hosted/GPU) Ollama reasoning model is permitted.
+    OFF by default: a cloud model means recon data (endpoint names, response
+    shapes) leaves this host, so the operator must opt in explicitly via
+    H4CK_BOT_ALLOW_CLOUD_LLM=1. Pair with H4CK_BOT_REASONING_MODEL=<model>:cloud
+    (or point OLLAMA_BASE_URL at a GPU host) to make the AI layers fast."""
+    return os.environ.get("H4CK_BOT_ALLOW_CLOUD_LLM", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 async def _prewarm_model(model: str, timeout: float) -> None:
     """Best-effort: load the model into Ollama (num_predict=1, keep_alive) BEFORE
     the first real reasoning call, so the one-time cold-load cost doesn't get
@@ -1465,7 +1474,8 @@ async def _run_redteam_pipeline(
     r_timeout = _reasoning_timeout(max(llm_timeout, 180.0))
     await _prewarm_model(r_model, timeout=r_timeout)
     try:
-        semantic = await SemanticModelBuilder(model=r_model, timeout=r_timeout).build(recon)
+        semantic = await SemanticModelBuilder(
+            model=r_model, timeout=r_timeout, allow_cloud=_allow_cloud_llm()).build(recon)
     except Exception as exc:  # noqa: BLE001
         from semantic.types import SemanticModel
         logger.warning("redteam %s: semantic model unavailable (%s) - recon-only",

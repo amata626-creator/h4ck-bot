@@ -110,10 +110,12 @@ _SYSTEM = (
 
 
 class LlmStrategist:
-    def __init__(self, model: str, ollama_base_url: str = "http://localhost:11434",
+    def __init__(self, model: str, ollama_base_url: str | None = None,
                  timeout: float = 60.0, max_items: int = 8):
+        import os
         self.model = model
-        self.base_url = ollama_base_url.rstrip("/")
+        self.base_url = (ollama_base_url
+                         or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
         self.timeout = timeout
         self.max_items = max_items
 
