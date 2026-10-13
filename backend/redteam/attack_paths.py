@@ -39,17 +39,58 @@ _CHAINABLE_STATUS = {FindingStatus.VALIDATED, FindingStatus.NEEDS_REVIEW}
 _SYSTEM = (
     "You are a penetration tester writing the attack-narrative section of a "
     "report. You are given a list of CONFIRMED findings, each with an id. Your "
-    "job is to identify ATTACK PATHS: ways two or more of these findings chain "
-    "together into a higher-impact outcome (e.g. reflected XSS + missing "
-    "SameSite cookie + a state-changing GET -> account takeover). Hard rules:\n"
+    "job is to identify genuine ATTACK PATHS: a CAUSAL chain where one finding "
+    "ENABLES the next, escalating to a higher-impact outcome.\n"
+    "A real path reads 'A lets the attacker do X, which makes B exploitable, "
+    "leading to <concrete impact>' — e.g. exposed .git leaks source -> hardcoded "
+    "DB creds -> auth bypass -> account takeover.\n"
+    "What is NOT an attack path (do NOT output these):\n"
+    "  - Two unrelated weaknesses that merely sit on the same host (e.g. 'weak "
+    "TLS ciphers + reflected XSS' — the cipher does not enable the XSS).\n"
+    "  - Two instances of the SAME bug (e.g. 'XSS on /a and XSS on /b').\n"
+    "  - A list of passive hardening gaps (missing headers + weak ciphers + "
+    "expired cert) — those are independent findings, not a chain.\n"
+    "Hard rules:\n"
     "1. Reference ONLY the finding ids provided. Never invent a finding.\n"
-    "2. Every path must chain at least TWO distinct findings.\n"
-    "3. Only assert a chain the listed findings actually support; if nothing "
-    "chains, return an empty list. Do not pad.\n"
+    "2. Every path chains at least TWO distinct findings of DIFFERENT kinds, and "
+    "the narrative MUST state how the earlier finding ENABLES the later one.\n"
+    "3. Only assert a chain the findings actually support. If nothing genuinely "
+    "chains, return an empty list. An empty list is the correct, expected answer "
+    "when findings are independent. NEVER pad.\n"
     "Respond with STRICT JSON only: "
     '{\"paths\": [{\"title\": \"...\", \"finding_ids\": [\"...\",\"...\"], '
-    '\"narrative\": \"how the chain works, step by step, grounded in the findings\"}]}'
+    '\"narrative\": \"how A enables B ... -> concrete impact, grounded in the findings\"}]}'
 )
+
+# Sources/classes that represent an ACTIVELY EXPLOITABLE weakness (an attacker
+# can DO something with it), as opposed to a passive hardening gap. A genuine
+# attack path must be anchored on at least one of these — a chain built purely
+# from missing-header / weak-cipher / expired-cert / open-port observations is a
+# findings list, not a path.
+_EXPLOITABLE_SOURCES = (
+    "bola_executor", "xss_executor", "injection_executor", "ssrf_oob_executor",
+    "xxe_oob_executor", "ssti_executor", "open_redirect_executor",
+    "cors_executor", "config_exposure_executor", "ai_synth_probe",
+)
+
+
+def _is_exploitable(f: Finding) -> bool:
+    """True if the finding is an actively-exploitable weakness (an executor
+    confirmed it, or it is a HIGH/CRITICAL vuln) rather than a passive hardening
+    gap. A chain must contain at least one of these to be a real attack path."""
+    src = (f.module_source or "").lower()
+    if any(src.startswith(s) for s in _EXPLOITABLE_SOURCES):
+        return True
+    return f.severity in (Severity.HIGH, Severity.CRITICAL)
+
+
+def _same_class(members: list[Finding]) -> bool:
+    """True if the members are all the same class of issue (one CWE AND one
+    source) — e.g. 'XSS on /a' + 'XSS on /b'. That is duplicate findings, not a
+    chain, so it is rejected."""
+    cwes = {getattr(m.cwe, "cwe_id", "") for m in members if getattr(m.cwe, "cwe_id", "")}
+    srcs = {(m.module_source or "") for m in members}
+    return len(cwes) < 2 and len(srcs) < 2
 
 
 class AttackPathChainer:
@@ -104,8 +145,17 @@ class AttackPathChainer:
             key = frozenset(ids)
             if key in seen_sets:
                 continue
-            seen_sets.add(key)
             members = [eligible[i] for i in ids]
+            # Deterministic quality gates — the model (esp. a small one) will
+            # group co-occurring findings and call it a chain; reject the two
+            # clearest non-chains regardless of what it claims.
+            if _same_class(members):
+                logger.info("attack-path: dropping same-class grouping %s (not a chain)", ids)
+                continue
+            if not any(_is_exploitable(m) for m in members):
+                logger.info("attack-path: dropping all-passive grouping %s (no exploitable anchor)", ids)
+                continue
+            seen_sets.add(key)
             # severity is derived from members, never trusted to the model
             sev = _RANK_SEV[max(_SEV_RANK[m.severity] for m in members)]
             phases: list[KillChainPhase] = []
