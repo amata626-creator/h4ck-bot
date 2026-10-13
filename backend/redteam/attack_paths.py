@@ -129,8 +129,11 @@ class AttackPathChainer:
             "model": self.model,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}],
-            "stream": False, "format": "json", "keep_alive": "10m",
-            "options": {"temperature": 0.2, "num_ctx": 8192},
+            "stream": False, "format": "json", "keep_alive": "30m",
+            # Bounded for CPU hosts (see strategist): cap output + shrink context
+            # so chaining completes instead of ReadTimeout'ing on an open-ended
+            # JSON generation.
+            "options": {"temperature": 0.2, "num_ctx": 4096, "num_predict": 1024},
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)

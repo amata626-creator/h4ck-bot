@@ -102,8 +102,11 @@ async def _propose_paths(tech_summary: str, known_paths: list[str], timeout: flo
     payload = {
         "model": _reasoning_model(),
         "messages": [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-        "stream": False, "format": "json", "keep_alive": "10m",
-        "options": {"temperature": 0.3, "num_ctx": 8192},
+        "stream": False, "format": "json", "keep_alive": "30m",
+        # Bounded for CPU hosts: cap output tokens and shrink the context so the
+        # path-proposal call completes well under the timeout instead of
+        # generating an unbounded list until it (previously ReadTimeout'd).
+        "options": {"temperature": 0.3, "num_ctx": 4096, "num_predict": 512},
     }
     async with httpx.AsyncClient(timeout=timeout) as c:
         r = await c.post(f"{_ollama_base()}/api/chat", json=payload)

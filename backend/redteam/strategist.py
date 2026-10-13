@@ -263,8 +263,13 @@ class LlmStrategist:
             ],
             "stream": False,
             "format": "json",
-            "keep_alive": "10m",
-            "options": {"temperature": 0.2, "num_ctx": 8192},
+            "keep_alive": "30m",
+            # Bound CPU cost: these prompts are a few thousand chars (well under
+            # 4096 tokens), and an uncapped JSON generation was running until the
+            # timeout on CPU-only hosts. num_predict caps the output; the smaller
+            # num_ctx shrinks the KV cache and prompt-eval. keep_alive holds the
+            # model warm between the semantic call and this one.
+            "options": {"temperature": 0.2, "num_ctx": 4096, "num_predict": 768},
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)
