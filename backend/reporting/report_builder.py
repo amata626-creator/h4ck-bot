@@ -262,9 +262,11 @@ def build_report_html(data: ReportData) -> str:
   .note {{ background: #f6f6f6; border-left: 3px solid var(--muted); padding: 10px 14px; font-size: 13px; color: #444; margin: 12px 0 20px; }}
   .footer {{ margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }}
   @media print {{
-    body {{ padding: 0; }}
-    .finding {{ break-inside: avoid; }}
+    body {{ padding: 0; font-size: 12px; }}
+    .finding, .apath, .exec {{ break-inside: avoid; }}
     .finding-title {{ font-size: 13px; }}
+    h2 {{ break-after: avoid; }}
+    a {{ color: inherit; text-decoration: none; }}
   }}
 </style>
 </head>
@@ -281,7 +283,9 @@ def build_report_html(data: ReportData) -> str:
     <span><strong>Modules:</strong> {esc(", ".join(data.modules))}</span>
   </div>
 
-  <h2>Summary</h2>
+  {_render_exec_summary(data, counts, validated)}
+
+  <h2>Findings summary</h2>
   <div class="summary">
     <div class="stat crit"><div class="n">{counts['critical']}</div><div class="l">Critical</div></div>
     <div class="stat high"><div class="n">{counts['high']}</div><div class="l">High</div></div>
@@ -497,6 +501,58 @@ def _render_attack_paths(data: "ReportData") -> str:
             'border-radius:8px;padding:14px 16px;margin-bottom:12px;page-break-inside:avoid}'
             '.apath-steps{font-size:13px;margin-top:8px}.apath-steps ol{margin:4px 0 0 18px}</style>'
             + "\n".join(blocks))
+
+
+def _render_exec_summary(data: "ReportData", counts: dict, validated: int) -> str:
+    """The executive summary a reader sees first: a plain-language overview, the
+    authorization attestation (this was an AUTHORIZED assessment), and the
+    headline risks — the top validated findings worst-first. Grounded entirely in
+    the findings; no spin."""
+    total = len(data.findings)
+    non_info = [f for f in data.findings if f.finding_kind.value != "informational"]
+    crit_high = counts["critical"] + counts["high"]
+    s = data.attack_surface or {}
+    surf_ct = (s.get("counts") or {})
+    ep = surf_ct.get("endpoints")
+
+    # Headline risks: validated, non-informational, worst-first, capped.
+    headline = [f for f in _sort_findings(non_info) if f.status.value == "validated"][:6]
+    if headline:
+        risks = "".join(
+            f'<li><span class="pill {f.severity.value}">{html.escape(f.severity.value.upper())}</span> '
+            f'{html.escape(f.title)}</li>' for f in headline
+        )
+        risks_block = f'<h3 style="margin-top:14px">Headline risks (validated)</h3><ul class="risks">{risks}</ul>'
+    else:
+        risks_block = ('<p style="margin-top:12px;color:var(--muted)">No findings reached '
+                       '<em>validated</em> status; items below are recorded for review.</p>')
+
+    posture = ("critical/high exposure present" if crit_high else
+               "no critical or high-severity findings validated" if validated else
+               "no vulnerabilities validated")
+    overview = (
+        f"This report documents an <strong>authorized</strong> security assessment of "
+        f"<strong>{html.escape(data.target)}</strong>"
+        + (f", conducted {html.escape(data.started_at)} to {html.escape(data.completed_at)}" if data.completed_at else "")
+        + f". {total} finding(s) were recorded, {validated} of them validated through the "
+        f"evidence pipeline"
+        + (f", including {crit_high} at critical/high severity" if crit_high else "")
+        + (f". Reconnaissance mapped {ep} endpoint(s) of attack surface" if ep else "")
+        + f". Overall posture: {posture}."
+    )
+    attest = (f'<div class="attest"><strong>Authorization:</strong> '
+              f'{html.escape(data.scope_note) if data.scope_note else "operator-attested, authorized testing only"}'
+              f' &middot; non-destructive, evidence-based methodology</div>')
+    return (
+        '<style>.exec{border:1px solid var(--border);border-left:4px solid var(--fg);'
+        'border-radius:8px;padding:16px 18px;margin:18px 0 8px;background:#fafafa}'
+        '.exec .ov{font-size:14px}.attest{font-size:12.5px;color:var(--muted);margin-top:10px;'
+        'border-top:1px solid var(--border);padding-top:8px}'
+        '.risks{margin:6px 0 0 0;padding-left:0;list-style:none}'
+        '.risks li{padding:4px 0;font-size:13.5px}.risks .pill{margin-right:8px}</style>'
+        '<h2>Executive summary</h2>'
+        f'<div class="exec"><div class="ov">{overview}</div>{risks_block}{attest}</div>'
+    )
 
 
 def _render_attack_surface(data: "ReportData") -> str:
