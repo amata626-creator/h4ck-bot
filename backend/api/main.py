@@ -1149,6 +1149,16 @@ async def get_attack_paths(assessment_id: str):
     return {"attack_paths": _STORE.list_attack_paths(assessment_id)}
 
 
+@app.get("/api/assessments/{assessment_id}/attack_surface")
+async def get_attack_surface(assessment_id: str):
+    """The mapped attack surface (endpoints, params, tech, auth surface) recon
+    discovered for this assessment. Read-only tier. Null when the scan didn't run
+    the recon/red-team engine (e.g. a modules-only or mobile/cloud scan)."""
+    if _STORE.get_assessment(assessment_id) is None:
+        raise HTTPException(404, "assessment not found")
+    return {"attack_surface": _STORE.get_attack_surface(assessment_id)}
+
+
 @app.get("/api/assessments/{assessment_id}/killchain")
 async def get_killchain(assessment_id: str):
     """Findings grouped by cyber-kill-chain phase + aggregated MITRE ATT&CK
@@ -1301,7 +1311,8 @@ async def get_report_json(assessment_id: str):
         raise HTTPException(404, "assessment not found")
     findings = _STORE.list_findings(assessment_id)
     data = build_report_data(meta, findings, scope_note=_SCOPE.authorization_ref,
-                             attack_paths=_STORE.list_attack_paths(assessment_id))
+                             attack_paths=_STORE.list_attack_paths(assessment_id),
+                             attack_surface=_STORE.get_attack_surface(assessment_id))
     return build_report_json(data)
 
 
@@ -1313,7 +1324,8 @@ async def get_report_html(assessment_id: str):
         raise HTTPException(404, "assessment not found")
     findings = _STORE.list_findings(assessment_id)
     data = build_report_data(meta, findings, scope_note=_SCOPE.authorization_ref,
-                             attack_paths=_STORE.list_attack_paths(assessment_id))
+                             attack_paths=_STORE.list_attack_paths(assessment_id),
+                             attack_surface=_STORE.get_attack_surface(assessment_id))
     return HTMLResponse(build_report_html(data))
 
 # ── Red-team assessment (hypothesis-driven loop) ────────────────────
@@ -1500,6 +1512,15 @@ async def _run_redteam_pipeline(
     recon = ctx.config.get("recon_results", {}).get("a0")
     if recon is None:
         raise RuntimeError("recon produced no result")
+
+    # Attack-surface map: distill what recon observed (endpoints, params, tech,
+    # auth surface) into a report-ready inventory and persist it. Best-effort —
+    # a mapping failure never aborts the assessment.
+    try:
+        from recon.attack_surface import build_attack_surface
+        _STORE.set_attack_surface(assessment_id, build_attack_surface(recon))
+    except Exception as exc:  # noqa: BLE001
+        logger.info("assessment %s: attack-surface mapping skipped: %s", assessment_id, exc)
 
     # 2. semantic model (local LLM). Uses the REASONING model (may differ from
     # the scan model - a fast model here keeps the AI layers alive on slow

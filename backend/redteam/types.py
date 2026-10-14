@@ -44,6 +44,7 @@ class HypothesisKind(str, Enum):
     OPEN_REDIRECT = "open_redirect"                   # CWE-601
     CORS_MISCONFIG = "cors_misconfiguration"          # CWE-942
     CONFIG_EXPOSURE = "config_exposure"               # CWE-538 (exposed .git/.env/etc.)
+    GRAPHQL_INTROSPECTION = "graphql_introspection"   # CWE-200 (schema disclosure)
     AI_PROBE = "ai_authored_probe"                    # AI synthesizes its own safe check
     SECURITY_MISCONFIG = "security_misconfiguration"  # CWE-16
 

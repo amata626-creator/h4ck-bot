@@ -63,6 +63,7 @@ class ReportData:
     findings: list[Finding]
     scope_note: str = ""
     attack_paths: list[dict] = field(default_factory=list)
+    attack_surface: dict | None = None
     methodology_note: str = (
         "Findings were produced by automated scanner modules and passed "
         "through a multi-layer validation pipeline. Informational findings "
@@ -81,6 +82,7 @@ def build_report_data(
     findings: list[Finding],
     scope_note: str = "",
     attack_paths: list[dict] | None = None,
+    attack_surface: dict | None = None,
 ) -> ReportData:
     return ReportData(
         assessment_id=assessment_meta.get("assessment_id", ""),
@@ -93,6 +95,7 @@ def build_report_data(
         findings=findings,
         scope_note=scope_note,
         attack_paths=attack_paths or [],
+        attack_surface=attack_surface,
     )
 
 
@@ -117,6 +120,7 @@ def build_report_json(data: ReportData) -> dict[str, Any]:
         "generated_at": data.generated_at,
         "scope_note": data.scope_note,
         "attack_paths": data.attack_paths,
+        "attack_surface": data.attack_surface,
         "killchain": killchain_summary(data.findings),
         "methodology_note": data.methodology_note,
         "summary": {
@@ -289,6 +293,8 @@ def build_report_html(data: ReportData) -> str:
     <span><strong>Total findings:</strong> {len(data.findings)}</span>
     <span><strong>Validated:</strong> {validated}</span>
   </div>
+
+  {_render_attack_surface(data)}
 
   {_render_killchain(data)}
 
@@ -491,6 +497,73 @@ def _render_attack_paths(data: "ReportData") -> str:
             'border-radius:8px;padding:14px 16px;margin-bottom:12px;page-break-inside:avoid}'
             '.apath-steps{font-size:13px;margin-top:8px}.apath-steps ol{margin:4px 0 0 18px}</style>'
             + "\n".join(blocks))
+
+
+def _render_attack_surface(data: "ReportData") -> str:
+    """Render the mapped attack surface: tech stack, inventory counts, auth
+    surface, and the top (most-promising-first) endpoints. This is the 'what the
+    target exposes' section a pentester puts up front."""
+    s = data.attack_surface
+    if not s:
+        return ""
+    c = s.get("counts", {})
+    tech = s.get("technologies", {})
+    tech_bits = [v for v in (tech.get("framework"), tech.get("language"), tech.get("server"),
+                             tech.get("powered_by"), tech.get("cms")) if v]
+    tech_bits += [p for p in (tech.get("detected_products") or []) if p not in tech_bits]
+    tech_line = html.escape(", ".join(dict.fromkeys(tech_bits)) or "not fingerprinted")
+
+    stat = (lambda n, l: f'<div class="stat"><div class="n">{n}</div><div class="l">{l}</div></div>')
+    stats = (stat(c.get("endpoints", 0), "Endpoints")
+             + stat(c.get("parameters", 0), "Parameters")
+             + stat(c.get("api_endpoints", 0), "API endpoints")
+             + stat(c.get("parameterized_endpoints", 0), "With params")
+             + stat(c.get("auth_required_endpoints", 0), "Auth-gated")
+             + stat(c.get("js_bundles", 0), "JS bundles"))
+
+    auth = s.get("auth_surface", {})
+    auth_bits = []
+    if auth.get("login_paths"):
+        auth_bits.append("login: " + html.escape(", ".join(auth["login_paths"][:5])))
+    if auth.get("cookie_names"):
+        auth_bits.append("cookies: " + html.escape(", ".join(auth["cookie_names"][:8])))
+    if auth.get("auth_header_names"):
+        auth_bits.append("auth headers: " + html.escape(", ".join(auth["auth_header_names"][:5])))
+    auth_line = (" &middot; ".join(auth_bits)) if auth_bits else "no authentication surface observed"
+
+    rows = []
+    shown = s.get("endpoints", [])[:25]
+    for e in shown:
+        params = ", ".join(e.get("params", [])[:8])
+        rows.append(
+            "<tr>"
+            f'<td class="mono">{html.escape(e.get("path",""))}</td>'
+            f'<td>{html.escape(",".join(e.get("methods", []) or ["GET"]))}</td>'
+            f'<td class="mono">{html.escape(params)}</td>'
+            f'<td>{html.escape(e.get("source",""))}</td>'
+            f'<td>{"yes" if e.get("auth_required") else ""}</td>'
+            "</tr>"
+        )
+    total = s.get("endpoint_total", len(shown))
+    more = (f'<div class="meta"><span>Showing top {len(shown)} of {total} endpoints '
+            f'(most-promising first; full set in report.json)</span></div>' if total > len(shown) else "")
+    bases = html.escape(", ".join(s.get("base_urls", []) or []))
+
+    return (
+        '<h2>Attack surface <span style="font-weight:400;font-size:12px;color:var(--muted)">'
+        '&middot; what recon mapped on the target</span></h2>'
+        '<style>.as-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}'
+        '.as-table th,.as-table td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);vertical-align:top}'
+        '.as-table th{color:var(--muted);font-weight:600}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}</style>'
+        f'<div class="meta"><span><strong>Base URLs:</strong> {bases or "n/a"}</span>'
+        f'<span><strong>Technology:</strong> {tech_line}</span></div>'
+        f'<div class="stats">{stats}</div>'
+        f'<div class="meta"><span><strong>Auth surface:</strong> {auth_line}</span></div>'
+        '<table class="as-table"><thead><tr><th>Endpoint</th><th>Methods</th>'
+        '<th>Parameters</th><th>Source</th><th>Auth</th></tr></thead>'
+        f'<tbody>{"".join(rows) or "<tr><td colspan=5>no endpoints observed</td></tr>"}</tbody></table>'
+        + more
+    )
 
 
 def _sort_findings(findings: list[Finding]) -> list[Finding]:

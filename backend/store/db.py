@@ -98,6 +98,13 @@ CREATE TABLE IF NOT EXISTS attack_paths (
 );
 CREATE INDEX IF NOT EXISTS idx_attack_paths_assessment
     ON attack_paths(assessment_id, created_at);
+
+CREATE TABLE IF NOT EXISTS attack_surface (
+    assessment_id  TEXT PRIMARY KEY,
+    created_at     TEXT NOT NULL,
+    document       TEXT NOT NULL,   -- attack-surface summary as JSON
+    FOREIGN KEY (assessment_id) REFERENCES assessments(assessment_id)
+);
 """
 
 
@@ -333,6 +340,25 @@ class Store:
                 (assessment_id,),
             ).fetchall()
         return [json.loads(r["document"]) for r in rows]
+
+    def set_attack_surface(self, assessment_id: str, surface: dict) -> None:
+        """Persist the assessment's attack-surface summary (one per assessment,
+        replaced on re-run)."""
+        from datetime import datetime, timezone
+        with self._lock, self._connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO attack_surface "
+                "(assessment_id, created_at, document) VALUES (?, ?, ?)",
+                (assessment_id, datetime.now(timezone.utc).isoformat(), json.dumps(surface)),
+            )
+
+    def get_attack_surface(self, assessment_id: str) -> dict | None:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT document FROM attack_surface WHERE assessment_id=?",
+                (assessment_id,),
+            ).fetchone()
+        return json.loads(row["document"]) if row else None
 
     def get_finding(self, assessment_id: str, finding_id: str) -> Finding | None:
         with self._connect() as con:

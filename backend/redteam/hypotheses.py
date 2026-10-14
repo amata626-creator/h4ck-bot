@@ -317,6 +317,32 @@ class HypothesisGenerator:
                 requires_active_testing=True,
             ))
 
+        # ── 3g. GraphQL introspection (well-known + observed GraphQL paths) ──
+        # Host-level audit sweep (like config exposure): the executor checks a
+        # fixed list of well-known GraphQL paths plus any observed graphql-ish
+        # endpoint, confirming only when a schema is actually returned.
+        out.append(Hypothesis(
+            hypothesis_id=new_id(),
+            kind=HypothesisKind.GRAPHQL_INTROSPECTION,
+            title="GraphQL introspection exposure",
+            target_endpoints=(ground([e.path for e in recon.endpoints
+                                      if "graphql" in e.path.lower() or "/gql" in e.path.lower()]) or ["/"]),
+            rationale=(
+                "Checking well-known GraphQL paths (and any observed graphql endpoint) with the "
+                "standard read-only introspection query. Reported only if the endpoint returns its "
+                "schema (__schema/queryType), never a bare 200. Non-destructive (a query, no mutation)."
+            ),
+            evidence_refs=["audit.graphql_introspection"],
+            cwe=WeaknessRef(cwe_id="CWE-200", name="Exposure of Sensitive Information"),
+            mitre=MitreTechnique(technique_id="T1592", tactic="reconnaissance",
+                                 name="Gather Victim Host Information"),
+            kill_chain_phase=KillChainPhase.RECONNAISSANCE,
+            estimated_severity=Severity.MEDIUM,
+            prior_confidence=0.25,
+            suggested_technique=Technique.API_TESTING,
+            requires_active_testing=True,
+        ))
+
         # ── 4. Broken authentication around the login surface ────────────
         if recon.auth.login_paths:
             login = ground(recon.auth.login_paths) or recon.auth.login_paths[:2]

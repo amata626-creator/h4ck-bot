@@ -52,6 +52,8 @@ _KIND_BY_NAME = {
     "redirect": HypothesisKind.OPEN_REDIRECT,
     "cors": HypothesisKind.CORS_MISCONFIG,
     "cors_misconfig": HypothesisKind.CORS_MISCONFIG,
+    "graphql": HypothesisKind.GRAPHQL_INTROSPECTION,
+    "graphql_introspection": HypothesisKind.GRAPHQL_INTROSPECTION,
     # AI writes its own check: when no dedicated kind fits, the model authors a
     # bounded, non-destructive probe (validated before it runs — see synth_probe).
     "ai_probe": HypothesisKind.AI_PROBE,
@@ -69,6 +71,7 @@ _TECH_BY_KIND = {
     HypothesisKind.SSTI: Technique.INJECTION_TESTING,
     HypothesisKind.OPEN_REDIRECT: Technique.API_TESTING,
     HypothesisKind.CORS_MISCONFIG: Technique.API_TESTING,
+    HypothesisKind.GRAPHQL_INTROSPECTION: Technique.API_TESTING,
     HypothesisKind.AI_PROBE: Technique.API_TESTING,
 }
 
@@ -80,7 +83,7 @@ _SYSTEM = (
     "1. You may ONLY name endpoints and parameters that appear in the OBSERVED "
     "SURFACE provided. Never invent a path or a parameter.\n"
     "2. For a standard check, choose 'kind' from: bola, idor, injection, xss, "
-    "ssrf, xxe, ssti, open_redirect, cors.\n"
+    "ssrf, xxe, ssti, open_redirect, cors, graphql.\n"
     "3. When you suspect a weakness NONE of those standard kinds covers, you may "
     "AUTHOR YOUR OWN CHECK with kind 'ai_probe'. You then supply a 'probe' object "
     "describing a SINGLE, bounded, NON-DESTRUCTIVE GET request and how to read the "

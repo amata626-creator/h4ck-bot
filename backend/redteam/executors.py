@@ -1355,6 +1355,118 @@ class ConfigExposureExecutor:
         return finding
 
 
+# Well-known GraphQL endpoint paths to check, plus any observed graphql-looking
+# endpoint. A fixed audit list, like the exposed-file checklist.
+_GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/v1/graphql", "/graphql/v1",
+                  "/query", "/api/graphql/v1", "/gql"]
+# Minimal introspection query — READ-ONLY (a query, never a mutation).
+_GQL_INTROSPECTION = "query{__schema{queryType{name}}}"
+
+
+class GraphqlIntrospectionExecutor:
+    """GraphQL introspection exposure (CWE-200).
+
+    A GraphQL endpoint with introspection enabled hands an attacker the entire
+    schema — every type, query, and mutation — i.e. a complete map of the API's
+    attack surface. Sends the standard, READ-ONLY introspection query (never a
+    mutation) to well-known and observed GraphQL paths and confirms ONLY when the
+    response actually returns a schema (the JSON contains __schema + queryType) —
+    not a bare 200 — so a generic 200 page can't false-positive. Prefers a POST
+    with a JSON query body (how GraphQL is normally called); falls back to a GET
+    query when POST isn't wired. Non-destructive: an introspection read, no
+    mutation. Dispositive (the schema is literally returned), so static_claim-
+    gated with requires_corroboration=False."""
+
+    handles = {HypothesisKind.GRAPHQL_INTROSPECTION}
+
+    async def execute(self, hyp: Hypothesis, ctx: "ExecContext") -> list[Finding]:
+        if not ctx.roe.target_authorized(ctx.target_host):
+            logger.warning("graphql: %s not authorized by RoE - skipping", ctx.target_host)
+            return []
+        base = (ctx.base_url or f"https://{ctx.target_host}").rstrip("/")
+        # observed graphql-looking endpoints first, then the fixed checklist
+        observed = [p for p in (hyp.target_endpoints or []) if "graphql" in p.lower() or "/gql" in p.lower()]
+        paths = list(dict.fromkeys(observed + _GRAPHQL_PATHS))
+        findings: list[Finding] = []
+        probed = 0
+        for path in paths:
+            if probed >= ctx.max_probes + 3:   # a few extra: the list is a cheap fixed sweep
+                break
+            probed += 1
+            url = base + "/" + path.lstrip("/")
+            res = await self._introspect(url, ctx)
+            if res is None:
+                continue
+            body = res.text or ""
+            low = body.lower()
+            if res.status != 200 or "__schema" not in low or ("querytype" not in low and '"types"' not in low):
+                continue
+            findings.append(self._finding(path, url, res, ctx))
+        return findings
+
+    async def _introspect(self, url, ctx) -> Optional["FetchResult"]:
+        # Prefer a POST JSON query (normal GraphQL call); fall back to GET query.
+        if ctx.post is not None:
+            try:
+                body = json.dumps({"query": _GQL_INTROSPECTION}).encode()
+                r = await ctx.post(url, body, "application/json")
+                await asyncio.sleep(ctx.pace_seconds)
+                if r.status == 200 and "__schema" in (r.text or "").lower():
+                    return r
+            except Exception as e:  # noqa: BLE001
+                logger.info("graphql: post failed %s: %s", url, e)
+        try:
+            from urllib.parse import quote
+            sep = "&" if "?" in url else "?"
+            r = await ctx.fetch(f"{url}{sep}query={quote(_GQL_INTROSPECTION)}")
+            await asyncio.sleep(ctx.pace_seconds)
+            return r
+        except Exception as e:  # noqa: BLE001
+            logger.info("graphql: get failed %s: %s", url, e)
+            return None
+
+    def _finding(self, path, url, res, ctx) -> Finding:
+        asset = Asset(asset_id="a0", name=ctx.target_host, asset_type="api",
+                      scope_approved=True, metadata={"exposure": "internet"})
+        claim = "__schema"
+        preview = (f"GET/POST {url}\nstatus: {res.status}\n"
+                   f"introspection query returned a schema (marker {claim!r} present)\n"
+                   f"{_snippet(res.text or '', claim, pad=80)}")
+        finding = Finding(
+            finding_id=str(uuid.uuid4()),
+            title=f"GraphQL introspection enabled on {path}",
+            description=(
+                f"The GraphQL endpoint {path} answers the standard introspection query with its "
+                "full schema (__schema/queryType returned), exposing every type, query, and "
+                "mutation — a complete map of the API's attack surface that should be disabled in "
+                "production. Confirmed with a read-only introspection query (no mutation) and gated "
+                "on the schema actually being returned, not a bare 200. Evidence is redacted to the "
+                "schema marker; the full schema is not stored."
+            ),
+            asset=asset, module_source="graphql_introspection_executor",
+            finding_kind=FindingKind.VULNERABILITY,
+            cvss=CvssScore(base_score=5.3, vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"),
+            cwe=WeaknessRef(cwe_id="CWE-200", name="Exposure of Sensitive Information to an Unauthorized Actor"),
+            mitre_techniques=[MitreTechnique(technique_id="T1592", tactic="reconnaissance",
+                                             name="Gather Victim Host Information")],
+            kill_chain_phase=KillChainPhase.RECONNAISSANCE,
+            remediation=(
+                "Disable GraphQL introspection in production (and field suggestions), and require "
+                "authentication/authorization on the GraphQL endpoint."
+            ),
+            business_impact="An exposed schema hands an attacker the full API map, accelerating targeted attacks.",
+            requires_corroboration=False,
+        )
+        finding.add_evidence(Evidence.new(
+            evidence_type=EvidenceType.RAW_OUTPUT, raw_bytes=preview.encode(),
+            storage_ref=f"mem://gql/{finding.finding_id}",
+            description=f"GraphQL introspection schema returned on {path}",
+            metadata={"preview": preview, "static_claim": claim, "static_artifact": True},
+        ))
+        logger.info("graphql: introspection enabled on %s", path)
+        return finding
+
+
 class ExecutorRegistry:
     """Maps a hypothesis to the executor that can safely check it. Each executor
     is non-destructive (GET-only, inert probes), scope-gated against the RoE, and
@@ -1376,6 +1488,7 @@ class ExecutorRegistry:
             OpenRedirectExecutor(),
             CorsExecutor(),
             ConfigExposureExecutor(),
+            GraphqlIntrospectionExecutor(),
             GenericProbeExecutor(),   # AI writes its own check (validated + evidence-gated)
         ]
 
